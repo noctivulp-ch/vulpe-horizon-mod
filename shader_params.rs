@@ -12,14 +12,25 @@ fn vulpe_shader_params(
         vulpe_engine::observe_client_bolt(bolt.id, bolt.at);
     }
     let config_dir = crate::game::Game::native_config_dir().ok();
-    let resolved_pack = if !game.native_shaders.picked.is_empty() {
-        std::path::PathBuf::from(&game.native_shaders.picked)
+    let shader_packs_dir = crate::game::Game::shader_packs_dir();
+    let picked_path = std::path::Path::new(&game.native_shaders.picked);
+    let resolved_pack = if !game.native_shaders.picked.is_empty() && picked_path.exists() {
+        picked_path.to_path_buf()
     } else if !game.settings.horizon.shader_pack.is_empty() {
-        horizon_client::shader_pack_list::resolve(
-            &crate::game::Game::shader_packs_dir(),
+        vulpe_engine::resolve_shader_pack_in_dir(
+            &shader_packs_dir,
             &game.settings.horizon.shader_pack,
         )
-        .1
+        .unwrap_or_else(|| {
+            horizon_client::shader_pack_list::resolve(
+                &shader_packs_dir,
+                &game.settings.horizon.shader_pack,
+            )
+            .1
+        })
+    } else if !game.native_shaders.picked.is_empty() {
+        vulpe_engine::resolve_shader_pack_in_dir(&shader_packs_dir, &game.native_shaders.picked)
+            .unwrap_or_else(|| picked_path.to_path_buf())
     } else {
         std::path::PathBuf::new()
     };

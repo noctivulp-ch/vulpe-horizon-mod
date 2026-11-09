@@ -12,10 +12,16 @@ fn vulpe_frame(game: &mut crate::game::Game<'_>) {
         if game.settings.horizon.shader_pack == vulpe_engine::UNPACKED_PACK_KEY {
             game.settings.horizon.shader_pack = "horizon:vulpe".to_string();
             let _ = game.settings.save(&crate::game::Game::options_path());
-            let (_, resolved) = horizon_client::shader_pack_list::resolve(
-                &crate::game::Game::shader_packs_dir(),
-                "horizon:vulpe",
-            );
+            let shader_packs_dir = crate::game::Game::shader_packs_dir();
+            let resolved =
+                vulpe_engine::resolve_shader_pack_in_dir(&shader_packs_dir, "horizon:vulpe")
+                    .unwrap_or_else(|| {
+                        horizon_client::shader_pack_list::resolve(
+                            &shader_packs_dir,
+                            "horizon:vulpe",
+                        )
+                        .1
+                    });
             game.native_shaders.select(&resolved.to_string_lossy());
         }
     }

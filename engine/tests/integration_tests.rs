@@ -22,11 +22,11 @@ fn test_end_to_end_flow() {
     config.set("sol_intensidad", 2.0);
     config.save(&temp_dir).unwrap();
 
-    // 2. Canal fijo: escribir constantes WGSL en la carpeta del pack
+    // 2. Canal fijo: copiar carpeta del pack a vulpe-mod/ y escribir constantes WGSL
     let pack_dir = temp_dir.join("shaderpack");
     fs::create_dir_all(&pack_dir).unwrap();
     let write_res = write_pack_constants(&pack_dir, &config);
-    assert!(matches!(write_res, PackWriteResult::Written(_)));
+    assert!(matches!(write_res, PackWriteResult::UnpackedAndWritten { .. }));
     set_fixed_channel_active(true);
 
     // 3. Ajustes en vivo: el jugador mueve un ajuste fino en tiempo real
@@ -67,7 +67,7 @@ fn test_end_to_end_flow() {
 }
 
 #[test]
-fn test_forms_b_and_c_end_to_end() {
+fn test_form_c_with_hshader_and_folder_pack_end_to_end() {
     let _guard = E2E_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     clear_lightning_strike();
     clear_live_adjustments();
@@ -75,53 +75,61 @@ fn test_forms_b_and_c_end_to_end() {
     let _ = take_pending_unpacked_pack_path();
     let _ = take_pending_pack_revert();
 
-    let temp_dir = std::env::temp_dir().join(format!("vulpe_e2e_bc_{}", std::process::id()));
+    let temp_dir = std::env::temp_dir().join(format!("vulpe_e2e_c06_{}", std::process::id()));
     let _ = fs::remove_dir_all(&temp_dir);
     let cfg_dir = temp_dir.join("config");
     let shaderpacks_dir = temp_dir.join("shaderpacks");
     fs::create_dir_all(&cfg_dir).unwrap();
     fs::create_dir_all(&shaderpacks_dir).unwrap();
 
-    // Crear un .hshader válido en shaderpacks/
-    let src_dir = temp_dir.join("src_pack");
-    fs::create_dir_all(&src_dir).unwrap();
-    let manifest_text = "schema = 1\nid = \"vulpe\"\nname = \"Vulpe\"\nversion = \"0.2.0-beta.1\"\napi = \"0.1\"\nshared = [\"constantes_mod.wgsl\"]\n";
-    fs::write(src_dir.join(PACK_MANIFEST_FILENAME), manifest_text).unwrap();
+    // A) Probar con pack en carpeta cuyo nombre (`vulpe-carpeta`) difiere del id (`vulpe`)
+    let folder_pack = shaderpacks_dir.join("vulpe-carpeta");
+    fs::create_dir_all(&folder_pack).unwrap();
+    let manifest_text = "schema = 1\nid = \"vulpe\"\nname = \"Vulpe\"\nversion = \"0.2.0-beta.1\"\napi = \"0.1\"\nshared = [\"constantes_mod.wgsl\"]\n[[post]]\nfile = \"post.wgsl\"\n";
+    fs::write(folder_pack.join(PACK_MANIFEST_FILENAME), manifest_text).unwrap();
     fs::write(
-        src_dir.join(CONSTANTS_WGSL_FILENAME),
+        folder_pack.join(CONSTANTS_WGSL_FILENAME),
         generate_default_constants_wgsl(),
     )
     .unwrap();
-    let hshader_path = shaderpacks_dir.join("vulpe-0.2.0-beta.1.hshader");
-    let py = std::process::Command::new("python3")
-        .arg("-c")
-        .arg("import sys, os, zipfile\nsrc, dst = sys.argv[1], sys.argv[2]\nwith zipfile.ZipFile(dst, 'w') as z:\n    for root, _, files in os.walk(src):\n        for f in files:\n            p = os.path.join(root, f)\n            z.write(p, os.path.relpath(p, src))\n")
-        .arg(&src_dir)
-        .arg(&hshader_path)
-        .status()
-        .unwrap();
-    assert!(py.success());
+    fs::write(folder_pack.join("post.wgsl"), "// carpeta original v1").unwrap();
 
-    // 1. En modo B sobre .hshader: no desempaqueta y mantiene canal fijo apagado (mods[0].z = 5.0)
-    let _ = execute_client_command("vulpe modo b", Some(&cfg_dir), Some(&hshader_path));
+    // Resolver `horizon:vulpe` a `shaderpacks/vulpe-carpeta` leyendo los manifiestos
+    let resolved_folder = resolve_shader_pack_in_dir(&shaderpacks_dir, "horizon:vulpe")
+        .expect("Debe encontrar vulpe-carpeta a partir de horizon:vulpe");
+    assert_eq!(resolved_folder, folder_pack);
+
+    // Ejecutar `/vulpe poner`: en modo C (por defecto), copia la carpeta a `shaderpacks/vulpe-mod/`
     let _ = execute_client_command(
         "vulpe poner cielo_brillo_manual 2.5",
         Some(&cfg_dir),
-        Some(&hshader_path),
+        Some(&resolved_folder),
     );
-    assert!(!is_fixed_channel_active());
-    assert!(!shaderpacks_dir.join(UNPACKED_PACK_DIR_NAME).exists());
-    let mut params = [[0.0; 4]; 8];
-    populate_shader_params_full(Some(0), 0.0, Some([0.0, 0.0, 0.0]), &mut params);
-    assert_eq!(params[0][2], 5.0);
-    assert_eq!(params[0][3], 1.0);
-
-    // 2. Cambiar a modo C sobre .hshader: desempaqueta en shaderpacks/vulpe-mod/, solicita selección y prende bit 4 (mods[0].z = 21.0)
-    let _ = execute_client_command("vulpe modo c", Some(&cfg_dir), Some(&hshader_path));
     assert!(is_fixed_channel_active());
-    let pending = take_pending_unpacked_pack_path().expect("Debe solicitar seleccionar vulpe-mod/");
+    let pending = take_pending_unpacked_pack_path().expect("Debe seleccionar vulpe-mod/");
     assert_eq!(pending, shaderpacks_dir.join(UNPACKED_PACK_DIR_NAME));
     assert!(pending.join(CONSTANTS_WGSL_FILENAME).is_file());
+    // La carpeta original del jugador no se tocó
+    assert!(
+        fs::read_to_string(folder_pack.join(CONSTANTS_WGSL_FILENAME))
+            .unwrap()
+            .contains("const VULPE_FIXED_CHANNEL_ACTIVE: bool = false;")
+    );
+    let mut params = [[0.0; 4]; 8];
+    populate_shader_params_full(Some(0), 0.0, Some([0.0, 0.0, 0.0]), &mut params);
+    assert_eq!(params[0][2], 21.0);
+    assert_eq!(params[0][3], 1.0);
+
+    // Si el canal fijo se pone en "apagado", desactiva el bit 4 y solicita revertir vulpe-mod
+    let _ = execute_client_command("vulpe modo apagado", Some(&cfg_dir), Some(&pending));
+    assert!(!is_fixed_channel_active());
+    assert!(take_pending_pack_revert());
+    populate_shader_params_full(Some(0), 0.0, Some([0.0, 0.0, 0.0]), &mut params);
+    assert_eq!(params[0][2], 5.0);
+
+    // Volver a activar modo "c"
+    let _ = execute_client_command("vulpe modo c", Some(&cfg_dir), Some(&resolved_folder));
+    assert!(is_fixed_channel_active());
     populate_shader_params_full(Some(0), 0.0, Some([0.0, 0.0, 0.0]), &mut params);
     assert_eq!(params[0][2], 21.0);
 

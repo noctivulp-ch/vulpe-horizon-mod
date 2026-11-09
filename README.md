@@ -24,7 +24,7 @@ da al shader algunos datos del mundo; el mod se los pasa por `frame.mods`.
 - Pasa la posición y edad del último rayo relativo a la cámara.
 - Lee los ajustes finos del jugador desde un archivo de configuración (`vulpe-horizon.toml`).
 - Pasa hasta 16 ajustes finos en vivo al shader sin recargar.
-- Escribe el archivo de constantes del pack (`constantes_mod.wgsl`) para el ajuste fino fijo, tanto con el pack en carpeta (Forma B, archivo de serie sin tocar `horizon-shaders.toml`) como con el `.hshader` de release (Forma C, desempaquetado automático en `shaderpacks/vulpe-mod/`), elegibles en `vulpe-horizon.toml` (`canal_fijo = "b" | "c" | "auto"`).
+- Escribe el archivo de constantes del pack (`constantes_mod.wgsl`) para el ajuste fino fijo mediante la Forma C (`canal_fijo = "c" | "apagado"`): desempaqueta el `.hshader` o copia la carpeta del pack en `shaderpacks/vulpe-mod/`, lo selecciona automáticamente (`horizon:vulpe_mod`) y regenera la copia cuando cambia el original sin tocar el pack del jugador.
 
 ## Puesta en marcha
 
