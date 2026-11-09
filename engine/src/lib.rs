@@ -40,6 +40,9 @@ pub const DAY_MODULO: i64 = 16_777_216;
 /// Tiempo máximo en segundos durante el cual un rayo se considera activo para el shader (10.0 s).
 pub const LIGHTNING_ACTIVE_SECONDS: f32 = 10.0;
 
+/// Cantidad máxima de ajustes en vivo simultáneos en el formato v1 (16 floats: mods[4..8]).
+pub const MAX_LIVE_ADJUSTMENTS: usize = 16;
+
 /// Registro en memoria del último rayo ocurrido en el mundo.
 #[derive(Clone, Copy, Debug)]
 pub struct LightningRecord {
@@ -47,7 +50,60 @@ pub struct LightningRecord {
     pub time: Instant,
 }
 
+/// Ajuste en vivo de un parámetro individual.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LiveAdjustment {
+    pub id: u32,
+    pub value: f32,
+}
+
 static LAST_LIGHTNING: Mutex<Option<LightningRecord>> = Mutex::new(None);
+static LIVE_ADJUSTMENTS: Mutex<Vec<LiveAdjustment>> = Mutex::new(Vec::new());
+
+/// Establece un ajuste en vivo por su ID numérico. Si ya existe, actualiza su valor.
+pub fn set_live_adjustment(id: u32, value: f32) -> bool {
+    if find_param_by_id(id).is_none() {
+        return false;
+    }
+    if let Ok(mut lock) = LIVE_ADJUSTMENTS.lock() {
+        if let Some(existing) = lock.iter_mut().find(|a| a.id == id) {
+            existing.value = value;
+        } else {
+            lock.push(LiveAdjustment { id, value });
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// Establece un ajuste en vivo por su nombre textual.
+pub fn set_live_adjustment_by_name(name: &str, value: f32) -> bool {
+    if let Some(param) = find_param_by_name(name) {
+        set_live_adjustment(param.id, value)
+    } else {
+        false
+    }
+}
+
+/// Elimina un ajuste en vivo por su ID numérico.
+pub fn remove_live_adjustment(id: u32) {
+    if let Ok(mut lock) = LIVE_ADJUSTMENTS.lock() {
+        lock.retain(|a| a.id != id);
+    }
+}
+
+/// Limpia todos los ajustes en vivo activos.
+pub fn clear_live_adjustments() {
+    if let Ok(mut lock) = LIVE_ADJUSTMENTS.lock() {
+        lock.clear();
+    }
+}
+
+/// Obtiene una copia de los ajustes en vivo registrados actualmente.
+pub fn get_live_adjustments() -> Vec<LiveAdjustment> {
+    LIVE_ADJUSTMENTS.lock().map(|lock| lock.clone()).unwrap_or_default()
+}
 
 /// Registra el impacto de un rayo desde coordenadas enteras de bloque `[i32; 3]`.
 pub fn record_lightning_strike(pos: [i32; 3]) {
@@ -94,6 +150,18 @@ pub fn populate_shader_params_full(
     camera_pos: Option<[f64; 3]>,
     params: &mut [[f32; 4]; 8],
 ) {
+    let live = get_live_adjustments();
+    populate_shader_params_live(day_time, partial, camera_pos, Some(&live), params);
+}
+
+/// Rellena el arreglo `params` permitiendo pasar ajustes en vivo explícitos.
+pub fn populate_shader_params_live(
+    day_time: Option<i64>,
+    partial: f32,
+    camera_pos: Option<[f64; 3]>,
+    live: Option<&[LiveAdjustment]>,
+    params: &mut [[f32; 4]; 8],
+) {
     // Limpiar todo a ceros primero
     for slot in params.iter_mut() {
         *slot = [0.0; 4];
@@ -107,12 +175,26 @@ pub fn populate_shader_params_full(
     // del jugador en render thread. Permanece en 0.0 con FLAG_PLAYER_VALID apagada.
     params[3] = [0.0, 0.0, 0.0, 0.0];
 
+    // Codificar hasta 16 ajustes en vivo en mods[4..8]
+    let empty_adjustments = [];
+    let adjustments = live.unwrap_or(&empty_adjustments);
+    let live_count = adjustments.len().min(MAX_LIVE_ADJUSTMENTS);
+
+    for (i, adj) in adjustments.iter().take(live_count).enumerate() {
+        if let Some(param) = find_param_by_id(adj.id) {
+            let encoded = param.encode_live(adj.value);
+            let slot_idx = 4 + (i / 4);
+            let elem_idx = i % 4;
+            params[slot_idx][elem_idx] = encoded;
+        }
+    }
+
     let ticks = match day_time {
         Some(t) => t,
         None => {
             // Sin reloj disponible (pantalla de título o mundo no cargado)
-            // mods[0]: firma 1001.0, tabla 1.0, banderas 0.0, ajustes en vivo 0.0
-            params[0] = [FORMAT_HEADER_SIG, PARAM_TABLE_VERSION, 0.0, 0.0];
+            // mods[0]: firma 1001.0, tabla 1.0, banderas 0.0, ajustes en vivo según live_count
+            params[0] = [FORMAT_HEADER_SIG, PARAM_TABLE_VERSION, 0.0, live_count as f32];
             return;
         }
     };
@@ -159,8 +241,8 @@ pub fn populate_shader_params_full(
     }
     let flags = flags_u32 as f32;
 
-    // mods[0] cabecera
-    params[0] = [FORMAT_HEADER_SIG, PARAM_TABLE_VERSION, flags, 0.0];
+    // mods[0] cabecera: [firma, versión_tabla, banderas, cantidad_ajustes_en_vivo]
+    params[0] = [FORMAT_HEADER_SIG, PARAM_TABLE_VERSION, flags, live_count as f32];
 
     // mods[1] tiempo
     params[1] = [day_mod, moon_phase, continuous_season, 0.0];
@@ -333,5 +415,77 @@ mod tests {
         // mods[3] debe ser [0,0,0,0] y bit 3 (8) apagado
         assert_eq!(params[3], [0.0, 0.0, 0.0, 0.0]);
         assert_eq!((params[0][2] as u32) & FLAG_PLAYER_VALID, 0);
+    }
+
+    #[test]
+    fn test_live_adjustments_encoding_and_decoding() {
+        let param = find_param_by_id(0).expect("Param 0 debe existir");
+        // Param 0: min 0.0, max 5.0, def 1.0
+        let encoded = param.encode_live(2.5); // t = 0.5, q = 2048, id = 0 -> 2048.0
+        let (id, q) = crate::table::decode_live_raw(encoded);
+        assert_eq!(id, 0);
+        assert_eq!(q, 2048);
+        let decoded_val = param.dequantize(q);
+        assert!((decoded_val - 2.5).abs() < 0.005);
+    }
+
+    #[test]
+    fn test_populate_with_live_adjustments() {
+        let mut params = [[0.0; 4]; 8];
+        let live = vec![
+            LiveAdjustment { id: 0, value: 2.5 },
+            LiveAdjustment { id: 15, value: 2.0 },
+            LiveAdjustment { id: 25, value: 500.0 },
+        ];
+
+        populate_shader_params_live(Some(0), 0.0, None, Some(&live), &mut params);
+
+        // Cabecera w: 3 ajustes en vivo
+        assert_eq!(params[0][3], 3.0);
+
+        // mods[4] tiene los 3 ajustes en sus tres primeras componentes
+        let (id0, _q0) = crate::table::decode_live_raw(params[4][0]);
+        assert_eq!(id0, 0);
+        let (id1, _q1) = crate::table::decode_live_raw(params[4][1]);
+        assert_eq!(id1, 15);
+        let (id2, _q2) = crate::table::decode_live_raw(params[4][2]);
+        assert_eq!(id2, 25);
+
+        assert_eq!(params[4][3], 0.0);
+        for i in 5..8 {
+            assert_eq!(params[i], [0.0, 0.0, 0.0, 0.0]);
+        }
+    }
+
+    #[test]
+    fn test_live_adjustments_max_cap_16() {
+        let mut params = [[0.0; 4]; 8];
+        let live: Vec<LiveAdjustment> = (0..20)
+            .map(|i| LiveAdjustment {
+                id: i,
+                value: 1.0,
+            })
+            .collect();
+
+        populate_shader_params_live(Some(0), 0.0, None, Some(&live), &mut params);
+
+        // Tope de 16 ajustes
+        assert_eq!(params[0][3], 16.0);
+        // Cada uno de los 16 floats en mods[4..8] debe estar ocupado (> 0.0)
+        for vec_idx in 4..8 {
+            for elem_idx in 0..4 {
+                assert!(params[vec_idx][elem_idx] >= 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_exact_integer_f32_precision() {
+        // 4095 * 4096 + 4095 = 16 777 215 (2^24 - 1), exacto en float f32
+        let max_code: u32 = 4095 * 4096 + 4095;
+        let as_f32 = max_code as f32;
+        let back_to_u32 = as_f32 as u32;
+        assert_eq!(max_code, back_to_u32);
+        assert_eq!(back_to_u32, 16_777_215);
     }
 }
