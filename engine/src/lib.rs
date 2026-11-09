@@ -2,6 +2,9 @@
 //!
 //! Implementa la especificación de `frame.mods` v1 descrita en `vulpe-horizon-spec/flexibilidad/mod-nativo.md`.
 
+use std::sync::Mutex;
+use std::time::Instant;
+
 /// Firma base de la cabecera del formato: 1000 + versión_formato.
 pub const FORMAT_VERSION: f32 = 1.0;
 pub const FORMAT_HEADER_SIG: f32 = 1000.0 + FORMAT_VERSION; // 1001.0
@@ -28,17 +31,61 @@ pub const TICKS_PER_DAY: f64 = 24_000.0;
 /// Módulo para el número de día del mundo (2^24 = 16 777 216).
 pub const DAY_MODULO: i64 = 16_777_216;
 
+/// Tiempo máximo en segundos durante el cual un rayo se considera activo para el shader (10.0 s).
+pub const LIGHTNING_ACTIVE_SECONDS: f32 = 10.0;
+
+/// Registro en memoria del último rayo ocurrido en el mundo.
+#[derive(Clone, Copy, Debug)]
+pub struct LightningRecord {
+    pub pos: [f64; 3],
+    pub time: Instant,
+}
+
+static LAST_LIGHTNING: Mutex<Option<LightningRecord>> = Mutex::new(None);
+
+/// Registra el impacto de un rayo desde coordenadas enteras de bloque `[i32; 3]`.
+pub fn record_lightning_strike(pos: [i32; 3]) {
+    record_lightning_strike_pos([pos[0] as f64, pos[1] as f64, pos[2] as f64]);
+}
+
+/// Registra el impacto de un rayo con precisión f64 en coordenadas de mundo.
+pub fn record_lightning_strike_pos(pos: [f64; 3]) {
+    record_lightning_strike_with_time(pos, Instant::now());
+}
+
+/// Registra un rayo indicando un instante específico (útil para pruebas unitarias).
+pub fn record_lightning_strike_with_time(pos: [f64; 3], time: Instant) {
+    if let Ok(mut lock) = LAST_LIGHTNING.lock() {
+        *lock = Some(LightningRecord { pos, time });
+    }
+}
+
+/// Obtiene el registro del último rayo si existe.
+pub fn get_last_lightning_strike() -> Option<LightningRecord> {
+    LAST_LIGHTNING.lock().ok().and_then(|lock| *lock)
+}
+
+/// Limpia el registro del último rayo.
+pub fn clear_lightning_strike() {
+    if let Ok(mut lock) = LAST_LIGHTNING.lock() {
+        *lock = None;
+    }
+}
+
 /// Rellena el arreglo `params` (8 vec4s, 32 floats) según el formato v1 de `frame.mods`.
-///
-/// Primer corte (M-01):
-/// - `mods[0]` cabecera: [1001.0, 1.0, banderas, 0.0]
-/// - `mods[1]` tiempo: [día mod 2^24, fase luna (0..7), estación continua (0..4), 0.0]
-/// - `mods[2]` rayo: [0.0, 0.0, 0.0, -1.0] (edad negativa = sin rayo)
-/// - `mods[3]` jugador: [0.0, 0.0, 0.0, 0.0] (no medido en cliente)
-/// - `mods[4..8]`: 16 ajustes en vivo (0.0 en este corte)
 pub fn populate_shader_params(
     day_time: Option<i64>,
     partial: f32,
+    params: &mut [[f32; 4]; 8],
+) {
+    populate_shader_params_full(day_time, partial, None, params);
+}
+
+/// Rellena el arreglo `params` con soporte para cámara (cálculo de rayo relativo).
+pub fn populate_shader_params_full(
+    day_time: Option<i64>,
+    partial: f32,
+    camera_pos: Option<[f64; 3]>,
     params: &mut [[f32; 4]; 8],
 ) {
     // Limpiar todo a ceros primero
@@ -48,6 +95,11 @@ pub fn populate_shader_params(
 
     // mods[2]: rayo ausente por defecto (edad negativa = no hay rayo)
     params[2] = [0.0, 0.0, 0.0, -1.0];
+
+    // mods[3]: estado del jugador [salud, daño, en_llamas, mojado]
+    // Límite de la API de Horizon: el cliente no dispone de lecturas de salud ni efectos de estado
+    // del jugador en render thread. Permanece en 0.0 con FLAG_PLAYER_VALID apagada.
+    params[3] = [0.0, 0.0, 0.0, 0.0];
 
     let ticks = match day_time {
         Some(t) => t,
@@ -79,8 +131,27 @@ pub fn populate_shader_params(
     let ticks_in_year = total_ticks.rem_euclid(ticks_per_year);
     let continuous_season = (ticks_in_year / ticks_per_season) as f32;
 
-    // Banderas válidas: tiempo (bit 0) y estación (bit 2)
-    let flags = (FLAG_TIME_VALID | FLAG_SEASON_VALID) as f32; // 1 | 4 = 5.0
+    // 4. Último rayo relativo a la cámara
+    let mut lightning_valid = false;
+    if let (Some(cam), Ok(lock)) = (camera_pos, LAST_LIGHTNING.lock()) {
+        if let Some(strike) = *lock {
+            let age = strike.time.elapsed().as_secs_f32();
+            if age >= 0.0 && age < LIGHTNING_ACTIVE_SECONDS {
+                let rel_x = (strike.pos[0] - cam[0]) as f32;
+                let rel_y = (strike.pos[1] - cam[1]) as f32;
+                let rel_z = (strike.pos[2] - cam[2]) as f32;
+                params[2] = [rel_x, rel_y, rel_z, age];
+                lightning_valid = true;
+            }
+        }
+    }
+
+    // Banderas válidas: tiempo (bit 0) y estación (bit 2), y rayo (bit 1) si está activo
+    let mut flags_u32 = FLAG_TIME_VALID | FLAG_SEASON_VALID;
+    if lightning_valid {
+        flags_u32 |= FLAG_LIGHTNING_VALID;
+    }
+    let flags = flags_u32 as f32;
 
     // mods[0] cabecera
     params[0] = [FORMAT_HEADER_SIG, PARAM_TABLE_VERSION, flags, 0.0];
@@ -204,5 +275,57 @@ mod tests {
         let huge_day = 16_777_216i64 + 42;
         populate_shader_params(Some(huge_day * 24_000), 0.0, &mut params);
         assert_eq!(params[1][0], 42.0);
+    }
+
+    #[test]
+    fn test_lightning_strike_relative_to_camera() {
+        clear_lightning_strike();
+        let mut params = [[0.0; 4]; 8];
+
+        // Impacto de rayo en (100.0, 64.0, 200.0)
+        record_lightning_strike_pos([100.0, 64.0, 200.0]);
+
+        // Cámara situada en (90.0, 60.0, 180.0)
+        let camera_pos = Some([90.0, 60.0, 180.0]);
+        populate_shader_params_full(Some(0), 0.0, camera_pos, &mut params);
+
+        // Cabecera: flags = 1 (tiempo) | 2 (rayo) | 4 (estación) = 7.0
+        assert_eq!(params[0][2], 7.0);
+
+        // Rayo en mods[2]: (10.0, 4.0, 20.0, edad >= 0.0)
+        assert!((params[2][0] - 10.0).abs() < 1e-5);
+        assert!((params[2][1] - 4.0).abs() < 1e-5);
+        assert!((params[2][2] - 20.0).abs() < 1e-5);
+        assert!(params[2][3] >= 0.0 && params[2][3] < LIGHTNING_ACTIVE_SECONDS);
+
+        clear_lightning_strike();
+    }
+
+    #[test]
+    fn test_expired_lightning_strike() {
+        clear_lightning_strike();
+        let mut params = [[0.0; 4]; 8];
+
+        // Rayo registrado con fecha pasada (hace 15 segundos)
+        let old_time = Instant::now() - std::time::Duration::from_secs(15);
+        record_lightning_strike_with_time([100.0, 64.0, 200.0], old_time);
+
+        let camera_pos = Some([90.0, 60.0, 180.0]);
+        populate_shader_params_full(Some(0), 0.0, camera_pos, &mut params);
+
+        // Flag de rayo apagada (flags = 5.0) y edad negativa
+        assert_eq!(params[0][2], 5.0);
+        assert_eq!(params[2], [0.0, 0.0, 0.0, -1.0]);
+
+        clear_lightning_strike();
+    }
+
+    #[test]
+    fn test_player_state_defaults() {
+        let mut params = [[0.0; 4]; 8];
+        populate_shader_params(Some(0), 0.0, &mut params);
+        // mods[3] debe ser [0,0,0,0] y bit 3 (8) apagado
+        assert_eq!(params[3], [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!((params[0][2] as u32) & FLAG_PLAYER_VALID, 0);
     }
 }

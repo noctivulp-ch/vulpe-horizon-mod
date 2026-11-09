@@ -19,6 +19,17 @@ bindings = [
     { name = "params", ty = "&mut [[f32; 4]; 8]", value = "params" },
 ]
 
+# Gancho nativo para registrar el impacto de rayos en el mundo
+[[injection]]
+id = "lightning_strike"
+hook = "lightning_strike"
+hook_version = 1
+kind = "HEAD"
+helper = "lightning_strike.rs"
+bindings = [
+    { name = "pos", ty = "[i32; 3]", value = "pos" },
+]
+
 # Crate propio del mod: lógica central y motor de cálculo de parámetros
 [[crate]]
 id = "engine"
