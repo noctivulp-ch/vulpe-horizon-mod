@@ -30,6 +30,30 @@ bindings = [
     { name = "pos", ty = "[i32; 3]", value = "pos" },
 ]
 
+# Gancho nativo para registrar el comando /vulpe en el autocompletado del chat (API 35)
+[[injection]]
+id = "commands"
+hook = "commands"
+hook_version = 1
+kind = "HEAD"
+helper = "commands.rs"
+bindings = [
+    { name = "commands", ty = "&mut Vec<&'static str>", value = "commands" },
+]
+
+# Gancho nativo para ejecutar los subcomandos de /vulpe en el cliente (API 35)
+[[injection]]
+id = "command"
+hook = "command"
+hook_version = 1
+kind = "HEAD"
+helper = "command.rs"
+bindings = [
+    { name = "game", ty = "&mut crate::game::Game<'_>", value = "self" },
+    { name = "command", ty = "&str", value = "command" },
+    { name = "ran", ty = "&mut bool", value = "ran" },
+]
+
 # Crate propio del mod: lógica central y motor de cálculo de parámetros
 [[crate]]
 id = "engine"

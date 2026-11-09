@@ -88,6 +88,58 @@ pub fn generate_full_constants_wgsl(config: &VulpeConfig) -> String {
     out
 }
 
+/// Nombre del manifiesto de un pack nativo de Horizon.
+pub const PACK_MANIFEST_FILENAME: &str = "horizon-shaders.toml";
+
+/// Si existe `horizon-shaders.toml` en la carpeta del pack, asegura que `constantes_mod.wgsl`
+/// esté declarado en la lista `shared` para que el validador de Horizon (`Pack::from_files`)
+/// acepte el archivo durante la recarga en caliente y lo inyecte en todas las etapas.
+fn ensure_manifest_includes_constants(pack_path: &Path) -> Result<(), std::io::Error> {
+    let manifest_path = pack_path.join(PACK_MANIFEST_FILENAME);
+    if !manifest_path.is_file() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&manifest_path)?;
+    if content.contains(CONSTANTS_WGSL_FILENAME) {
+        return Ok(());
+    }
+
+    let updated = if let Some(shared_pos) = content.find("shared") {
+        if let Some(bracket_rel) = content[shared_pos..].find('[') {
+            let insert_at = shared_pos + bracket_rel + 1;
+            let mut out = String::with_capacity(content.len() + 40);
+            out.push_str(&content[..insert_at]);
+            out.push_str(&format!("\n    \"{CONSTANTS_WGSL_FILENAME}\","));
+            out.push_str(&content[insert_at..]);
+            out
+        } else {
+            return Ok(());
+        }
+    } else {
+        // Insertar `shared = ["constantes_mod.wgsl"]` antes de la primera sección `[`
+        let mut insert_offset = content.len();
+        let mut offset = 0;
+        for line in content.split_inclusive('\n') {
+            if line.trim_start().starts_with('[') {
+                insert_offset = offset;
+                break;
+            }
+            offset += line.len();
+        }
+        let mut out = String::with_capacity(content.len() + 48);
+        out.push_str(&content[..insert_offset]);
+        out.push_str(&format!("shared = [\"{CONSTANTS_WGSL_FILENAME}\"]\n\n"));
+        out.push_str(&content[insert_offset..]);
+        out
+    };
+
+    if updated != content {
+        fs::write(&manifest_path, updated)?;
+    }
+    Ok(())
+}
+
 /// Escribe el archivo de constantes en el directorio del pack.
 ///
 /// Si el pack es un archivo `.hshader`, detecta que está empaquetado y no permite
@@ -118,7 +170,12 @@ pub fn write_pack_constants(pack_path: &Path, config: &VulpeConfig) -> PackWrite
     let wgsl_content = generate_constants_wgsl(config);
 
     match fs::write(&target_file, wgsl_content) {
-        Ok(()) => PackWriteResult::Written(target_file),
+        Ok(()) => {
+            if let Err(e) = ensure_manifest_includes_constants(pack_path) {
+                return PackWriteResult::IoError(e.to_string());
+            }
+            PackWriteResult::Written(target_file)
+        }
         Err(e) => PackWriteResult::IoError(e.to_string()),
     }
 }
@@ -200,5 +257,54 @@ mod tests {
         let config = VulpeConfig::default();
         let res = write_pack_constants(non_existent, &config);
         assert_eq!(res, PackWriteResult::NotFound(non_existent.to_path_buf()));
+    }
+
+    #[test]
+    fn test_write_pack_constants_updates_manifest_shared() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("vulpe_manifest_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).expect("Crear dir");
+
+        let manifest_path = temp_dir.join(PACK_MANIFEST_FILENAME);
+        let initial_manifest = "schema = 1\nid = \"vulpe\"\nname = \"Vulpe\"\nversion = \"0.2.0\"\napi = \"0.1\"\nshared = [\n    \"nucleo/matematica/constantes.wgsl\",\n]\n\n[[post]]\nfile = \"post.wgsl\"\n";
+        fs::write(&manifest_path, initial_manifest).unwrap();
+
+        let mut config = VulpeConfig::default();
+        config.set("cielo_brillo_manual", 2.5);
+
+        let res = write_pack_constants(&temp_dir, &config);
+        assert!(matches!(res, PackWriteResult::Written(_)));
+
+        let updated_manifest = fs::read_to_string(&manifest_path).unwrap();
+        assert!(updated_manifest.contains("\"constantes_mod.wgsl\""));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_write_pack_constants_inserts_shared_when_absent_in_manifest() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("vulpe_manifest_noshared_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).expect("Crear dir");
+
+        let manifest_path = temp_dir.join(PACK_MANIFEST_FILENAME);
+        let initial_manifest = "schema = 1\nid = \"sonda\"\nname = \"Sonda\"\nversion = \"0.1.0\"\napi = \"0.1\"\n\n[[post]]\nfile = \"post.wgsl\"\n";
+        fs::write(&manifest_path, initial_manifest).unwrap();
+
+        let mut config = VulpeConfig::default();
+        config.set("cielo_brillo_manual", 2.5);
+
+        let res = write_pack_constants(&temp_dir, &config);
+        assert!(matches!(res, PackWriteResult::Written(_)));
+
+        let updated_manifest = fs::read_to_string(&manifest_path).unwrap();
+        assert!(updated_manifest.contains("shared = [\"constantes_mod.wgsl\"]"));
+        let shared_idx = updated_manifest.find("shared =").unwrap();
+        let post_idx = updated_manifest.find("[[post]]").unwrap();
+        assert!(shared_idx < post_idx);
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

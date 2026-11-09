@@ -4,13 +4,13 @@ Mod nativo de [Horizon](https://github.com/horizon-rust/horizon) que acompaña a
 [vulpe-horizon](https://github.com/noctivulp-ch/vulpe-horizon). Le pasa al pack, por `frame.mods` (`array<vec4<f32>, 8>`),
 el ajuste fino que no cabe en las 64 opciones del menú de Horizon y datos del mundo que la API básica de shaders no proporciona.
 
-Este repositorio contiene la implementación del **segundo corte (M-02)**:
+Este repositorio contiene la implementación del **segundo corte (M-02)** y las **correcciones en vivo (C-04)**:
 - Estructura bundle y crate del mod según `docs/native-mods.md` de Horizon.
-- Ganchos `native_shader_params` (API 84) y `native_lightning_strike` (API 236).
-- Formato v1 de `frame.mods`: cabecera (firma, tabla, banderas, contador en vivo), tiempo/estaciones y rayo relativo a la cámara.
-- Configuración del jugador mediante archivo TOML (`config/vulpe-horizon.toml`).
-- Codificación de hasta 16 ajustes en vivo simultáneos (`id × 4096 + q`).
-- Segundo canal (fijo) mediante generación de `constantes_mod.wgsl` para recarga en caliente (hot reload cada 500 ms) en carpetas de pack, con fallback para `.hshader`.
+- Ganchos `native_shader_params` (API 84), `native_lightning_strike` (API 236) y comandos del cliente `native_commands` / `native_command` (API 35).
+- Formato v1 de `frame.mods`: cabecera (firma, tabla, banderas, contador en vivo), tiempo/estaciones y rayo relativo a la cámara (`game.view.position` + `game.bolts`).
+- Configuración del jugador mediante archivo TOML (`config/vulpe-horizon.toml`), sincronizada automáticamente cada 500 ms y mediante comandos `/vulpe`.
+- Codificación de hasta 16 ajustes en vivo simultáneos (`id × 4096 + q`) en `frame.mods[4..7]`.
+- Segundo canal (fijo) mediante generación de `constantes_mod.wgsl` y registro en `shared` de `horizon-shaders.toml` para recarga en caliente (hot reload cada 500 ms) en carpetas de pack, con fallback para `.hshader`.
 - Pruebas unitarias e integración exhaustivas en `engine/`.
 
 Licencia: GPL-3.0-or-later ([LICENSE](LICENSE)).
@@ -23,11 +23,15 @@ Licencia: GPL-3.0-or-later ([LICENSE](LICENSE)).
 vulpe-horizon-mod/
   ├── horizon-mixin.toml     # Manifiesto del bundle para horizon-mixins (id = "vulpe")
   ├── shader_params.rs       # Helper privado inyectado en native_shader_params
+  ├── lightning_strike.rs    # Helper privado inyectado en native_lightning_strike
+  ├── commands.rs            # Helper privado inyectado en native_commands (API 35)
+  ├── command.rs             # Helper privado inyectado en native_command (API 35)
   ├── engine/                # Crate propio del mod (miembro del workspace de Horizon)
   │   ├── Cargo.toml         # Paquete vulpe-engine (edición 2024, sin dependencias externas)
-  │   └── src/lib.rs         # Motor de formato v1 y pruebas unitarias
+  │   └── src/               # Motor de formato v1, tabla, configuración, constantes y pruebas
   ├── docs/
-  │   └── decisiones.md      # Registro detallado de decisiones de diseño
+  │   ├── decisiones.md      # Registro detallado de decisiones de diseño
+  │   └── guia.md            # Guía técnica y de verificación
   └── README.md
 ```
 
@@ -59,16 +63,16 @@ Opcionalmente, se puede especificar el perfil de compilación:
 - `--profile release`: optimización máxima con LTO delgado.
 
 ### 3. Dónde queda el artefacto
-`horizon-launcher native-build` compila el juego con el mod integrado en el directorio de datos del launcher:
-- **Caché y artefactos de compilación:** `~/.local/share/horizon-launcher/native/target/`
-- **Juego instalado para la instancia:** `~/.local/share/horizon-launcher/versions/native-<id>/`
+`horizon-launcher native-build` compila el juego con el mod integrado en el directorio de datos del lanzador:
+- **Caché y artefactos de compilación:** `<datos-del-lanzador>/native/target/`
+- **Juego instalado para la instancia:** `<datos-del-lanzador>/versions/native-<id>/`
 - La instancia seleccionada queda automáticamente configurada para jugar esta versión construida.
 
 ---
 
 ## Cómo comprobar `frame.mods` en el juego
 
-El gestor puede verificar que el mod está activo e inyectando datos correctamente inspeccionando los componentes de `frame.mods` en el shader.
+El gestor puede verificar que el mod está activo e inyectando datos correctamente inspeccionando los componentes de `frame.mods` en el shader o ejecutando `/vulpe estado` en el chat.
 
 ### Valores esperados de `frame.mods` (Formato v1)
 
@@ -83,13 +87,14 @@ El gestor puede verificar que el mod está activo e inyectando datos correctamen
 
 #### En un mundo cargado según el día, la hora y el clima
 
-| Escenario | Comando | `frame.mods[0]` (Cabecera) | `frame.mods[1]` (Tiempo y Estación) | `frame.mods[2]` (Rayo) |
+| Escenario | Comando / Acción | `frame.mods[0]` (Cabecera) | `frame.mods[1]` (Tiempo y Estación) | `frame.mods[2]` (Rayo) |
 |---|---|---|---|---|
-| **Día 0, amanecer** | `/time set 0` | `(1001.0, 1.0, 5.0, 0.0)` | `(0.0, 0.0, 0.000, 0.0)` | `(0.0, 0.0, 0.0, -1.0)` |
+| **En reposo (día 0, amanecer)** | `/time set 0` | `(1001.0, 1.0, 5.0, 0.0)` | `(0.0, 0.0, 0.000, 0.0)` | `(0.0, 0.0, 0.0, -1.0)` |
 | **Día 0, noche** | `/time set 18000` | `(1001.0, 1.0, 5.0, 0.0)` | `(0.0, 0.0, 0.031, 0.0)` | `(0.0, 0.0, 0.0, -1.0)` |
 | **Día 1, amanecer** | `/time set 24000` | `(1001.0, 1.0, 5.0, 0.0)` | `(1.0, 1.0, 0.042, 0.0)` | `(0.0, 0.0, 0.0, -1.0)` |
-| **Rayo caído cerca** | `/summon lightning_bolt ~10 ~ ~20` o `/weather thunder` | `(1001.0, 1.0, 7.0, 0.0)` | `(día, luna, estación, 0.0)` | `(rel_x, rel_y, rel_z, edad)` |
-| **Con canal fijo activo** | Al escribir `constantes_mod.wgsl` | `(1001.0, 1.0, 21.0 ó 23.0, N)` | `(día, luna, estación, 0.0)` | Según presencia de rayo |
+| **Rayo activo (< 10 s)** | `/summon lightning_bolt 180 90 186` o `/weather thunder` | `(1001.0, 1.0, 7.0, 0.0)` | `(día, luna, estación, 0.0)` | `(180 - cam_x, 90 - cam_y, 186 - cam_z, edad)` |
+| **Rayo expirado (≥ 10 s)** | A los 14 s tras el rayo | `(1001.0, 1.0, 5.0, 0.0)` | `(día, luna, estación, 0.0)` | `(0.0, 0.0, 0.0, -1.0)` |
+| **Canal fijo + ajuste en vivo** | `/vulpe poner cielo_brillo_manual 2.5` o editar `config/vulpe-horizon.toml` | `(1001.0, 1.0, 21.0, 1.0)` | `(día, luna, estación, 0.0)` | Según presencia de rayo (`23.0` si hay rayo) |
 
 #### Desglose de componentes:
 - **Banderas (`mods[0].z`):** suma binaria de enteros exactos:
@@ -97,7 +102,7 @@ El gestor puede verificar que el mod está activo e inyectando datos correctamen
   - `+2.0` (Bit 1): Datos de rayo válidos (activo durante 10 segundos tras el impacto).
   - `+4.0` (Bit 2): Datos de estación válidos.
   - `+8.0` (Bit 3): Estado de jugador válido (0.0 en este corte: límite de API cliente).
-  - `+16.0` (Bit 4): Canal fijo en uso (constantes WGSL presentes).
+  - `+16.0` (Bit 4): Canal fijo en uso (`constantes_mod.wgsl` escrito en la carpeta del pack).
   - *Valores comunes:* `5.0` (tiempo + estación), `7.0` (tiempo + estación + rayo), `21.0` (tiempo + estación + canal fijo), `23.0` (tiempo + estación + rayo + canal fijo).
 - **Ajustes en vivo (`mods[0].w`):** número de ajustes finos activos en `mods[4..7]` (de `0.0` a `16.0`).
 - **Rayo (`mods[2]`):**
@@ -108,16 +113,86 @@ El gestor puede verificar que el mod está activo e inyectando datos correctamen
 
 ---
 
-## Cómo provocar y comprobar el rayo en el juego
+## 1. Cómo provocar y comprobar el rayo en el juego
 
-1. Entra a un mundo en Horizon con el shader Vulpe activo.
-2. Abre la consola del chat y ejecuta:
+1. Entra a un mundo en Horizon con el pack activo.
+2. En reposo (sin rayo reciente y con la configuración por defecto):
+   - `frame.mods[0].z = 5.0`
+   - `frame.mods[2] = (0.0, 0.0, 0.0, -1.0)`
+3. Abre el chat y ejecuta:
    ```mcfunction
-   /summon lightning_bolt ~10 ~ ~20
+   /summon lightning_bolt 180 90 186
    ```
-   (o bien `/weather thunder` y espera a que caiga un relámpago natural).
-3. **Comprobación inmediata:**
-   - La cabecera `frame.mods[0].z` pasa de `5.0` a `7.0` (enciende el bit 1 de rayo válido).
-   - `frame.mods[2].xyz` muestra la posición del rayo relativa a tus ojos (por ejemplo `(10.0, 0.0, 20.0)` si invocaste a `~10 ~ ~20`).
-   - `frame.mods[2].w` comienza en `0.0` y va aumentando con el tiempo transcurrido en segundos.
-   - Tras 10 segundos, `frame.mods[2].w` vuelve a `-1.0` y la bandera `frame.mods[0].z` regresa a `5.0`.
+   (o bien `/summon lightning_bolt ~10 ~ ~20`, o `/weather thunder`; nota: con `/weather thunder` el motor de Minecraft sortea `1/100 000` por chunk activo y tick, por lo que los rayos naturales caen de forma estocástica cada ~20-30 s de media, mientras que `/summon lightning_bolt` es instantáneo y determinista).
+4. **Valores esperados:**
+   - **Entre `0.0 s` y `10.0 s` (p. ej. a `1.5 s`):**
+     - `frame.mods[0].z = 7.0` (o `23.0` si el canal fijo también está activo).
+     - `frame.mods[2].xyz = (180.0 - cam_x, 90.0 - cam_y, 186.0 - cam_z)`.
+     - `frame.mods[2].w` empieza en `0.0` y avanza en segundos (`~1.5` al cabo de `1.5 s`).
+   - **Pasados `10.0 s` (p. ej. a `14.0 s`):**
+     - `frame.mods[0].z` regresa a `5.0` (o `21.0` con canal fijo).
+     - `frame.mods[2]` regresa a `(0.0, 0.0, 0.0, -1.0)`.
+
+---
+
+## 2. Cómo activar y comprobar el canal fijo (`constantes_mod.wgsl`)
+
+El canal fijo se activa automáticamente al modificar cualquier parámetro respecto a su valor por defecto, ya sea **desde el chat del juego** con `/vulpe poner` o **editando el archivo `config/vulpe-horizon.toml`** en la carpeta de la instancia (el mod lo crea en el primer arranque y lo vigila cada 500 ms).
+
+### Vía A — Desde el chat del juego:
+1. Ejecuta en el chat:
+   ```mcfunction
+   /vulpe poner cielo_brillo_manual 2.5
+   ```
+2. **Qué ocurre y valores esperados:**
+   - Se actualiza `config/vulpe-horizon.toml` con `cielo_brillo_manual = 2.5000`.
+   - En la carpeta del shader pack activo (`shaderpacks/<pack>/`) se escribe `constantes_mod.wgsl` con:
+     ```wgsl
+     const VULPE_PARAM_TABLE_VERSION: f32 = 1.0;
+     const VULPE_FIXED_CHANNEL_ACTIVE: bool = true;
+
+     // Brillo manual del cielo (defecto: 1)
+     const VULPE_CIELO_BRILLO_MANUAL: f32 = 2.50000;
+     ```
+   - Si `horizon-shaders.toml` del pack no incluía aún `"constantes_mod.wgsl"` en `shared`, el mod lo añade automáticamente para que Horizon valide y recargue el pack en caliente a los 500 ms (`Shader pack ... reloaded`).
+   - En `frame.mods`:
+     - `frame.mods[0].z` pasa de `5.0` a **`21.0`** (`1` tiempo + `4` estación + `16` canal fijo), o **`23.0`** si hay un rayo activo.
+
+### Vía B — Editando `config/vulpe-horizon.toml` en disco:
+1. Abre `config/vulpe-horizon.toml` en la carpeta `config/` de la instancia y cambia por ejemplo `cielo_brillo_manual = 2.5000`.
+2. Guarda el archivo: en menos de 500 ms el mod detecta el cambio, escribe `constantes_mod.wgsl` en el pack activo y `frame.mods[0].z` pasa a **`21.0`**.
+
+---
+
+## 3. Cómo activar y comprobar los 16 ajustes en vivo (`frame.mods[4..7]`)
+
+Cada ajuste en vivo se codifica como un float exacto `id × 4096 + q`, donde `q = round(((valor - min) / (max - min)) * 4095)`.
+
+### Comprobación de 1 ajuste en vivo:
+1. Ejecuta en el chat:
+   ```mcfunction
+   /vulpe vivo cielo_brillo_manual 2.5
+   ```
+   *(Nota: `/vulpe vivo` activa únicamente el canal en vivo dejando `mods[0].z = 5.0`; `/vulpe poner` o editar `config/vulpe-horizon.toml` activa a la vez el canal fijo `mods[0].z = 21.0` y el canal en vivo).*
+2. **Valores esperados:**
+   - `cielo_brillo_manual` tiene `id = 0`, `min = 0.0`, `max = 5.0` → para `2.5`, `t = 0.5`, `q = 2048` → código = `0 × 4096 + 2048 = 2048.0`.
+   - `frame.mods[0].w = 1.0` (1 ajuste en vivo activo).
+   - `frame.mods[4].x = 2048.0`, y el resto de componentes de `mods[4..7]` en `0.0`.
+
+### Comprobación de varios ajustes o del tope de 16 ajustes en vivo:
+- Si añades un segundo ajuste, por ejemplo:
+  ```mcfunction
+  /vulpe vivo sol_intensidad 2.5
+  ```
+  (`sol_intensidad` tiene `id = 14`, `min = 0.0`, `max = 5.0` → `q = 2048` → código = `14 × 4096 + 2048 = 59392.0`):
+  - `frame.mods[0].w = 2.0`
+  - `frame.mods[4].x = 2048.0`
+  - `frame.mods[4].y = 59392.0`
+- Si modificas 16 o más parámetros en `config/vulpe-horizon.toml` (o con `/vulpe poner` / `/vulpe vivo`), `frame.mods[0].w` llega al tope de **`16.0`** y las 16 componentes de `frame.mods[4]`, `frame.mods[5]`, `frame.mods[6]` y `frame.mods[7]` contienen los primeros 16 parámetros modificados codificados como `id × 4096 + q`.
+
+### Cómo restablecer el estado de reposo:
+Ejecuta en el chat:
+```mcfunction
+/vulpe restablecer
+```
+- `frame.mods[0]` vuelve a `(1001.0, 1.0, 5.0, 0.0)` y `frame.mods[4..7]` vuelve a `0.0`.

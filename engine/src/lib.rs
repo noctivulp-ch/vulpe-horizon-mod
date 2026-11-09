@@ -8,13 +8,14 @@ pub mod table;
 
 pub use config::VulpeConfig;
 pub use constants::{
-    CONSTANTS_WGSL_FILENAME, PackWriteResult, generate_constants_wgsl, generate_full_constants_wgsl,
-    write_pack_constants,
+    CONSTANTS_WGSL_FILENAME, PACK_MANIFEST_FILENAME, PackWriteResult, generate_constants_wgsl,
+    generate_full_constants_wgsl, write_pack_constants,
 };
 pub use table::{ParamDef, PARAM_TABLE, find_param_by_id, find_param_by_name};
 
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 /// Firma base de la cabecera del formato: 1000 + versión_formato.
 pub const FORMAT_VERSION: f32 = 1.0;
@@ -63,8 +64,26 @@ pub struct LiveAdjustment {
 }
 
 static LAST_LIGHTNING: Mutex<Option<LightningRecord>> = Mutex::new(None);
+static LAST_CLIENT_BOLT_ID: Mutex<Option<u32>> = Mutex::new(None);
 static LIVE_ADJUSTMENTS: Mutex<Vec<LiveAdjustment>> = Mutex::new(Vec::new());
 static FIXED_CHANNEL_ACTIVE: Mutex<bool> = Mutex::new(false);
+
+const RUNTIME_SYNC_INTERVAL: Duration = Duration::from_millis(500);
+
+#[derive(Default)]
+struct RuntimeSyncState {
+    initialized: bool,
+    last_check: Option<Instant>,
+    last_config_stamp: Option<(u64, Option<SystemTime>)>,
+    last_pack_path: Option<PathBuf>,
+}
+
+static RUNTIME_SYNC: Mutex<RuntimeSyncState> = Mutex::new(RuntimeSyncState {
+    initialized: false,
+    last_check: None,
+    last_config_stamp: None,
+    last_pack_path: None,
+});
 
 /// Activa o desactiva la bandera del canal fijo (archivo de constantes WGSL del pack).
 pub fn set_fixed_channel_active(active: bool) {
@@ -140,6 +159,32 @@ pub fn record_lightning_strike_with_time(pos: [f64; 3], time: Instant) {
     }
 }
 
+/// Observa el último rayo activo en la lista cliente `game.bolts` (funciona tanto en un jugador
+/// como conectado a un servidor remoto, para `/summon lightning_bolt`, `/weather thunder`,
+/// tridentes y caballos trampa). Solo reinicia el reloj cuando aparece un `bolt_id` nuevo.
+pub fn observe_client_bolt(bolt_id: u32, pos: [f64; 3]) {
+    if let Ok(mut id_lock) = LAST_CLIENT_BOLT_ID.lock() {
+        if *id_lock == Some(bolt_id) {
+            return;
+        }
+        *id_lock = Some(bolt_id);
+    }
+    if let Ok(mut lock) = LAST_LIGHTNING.lock() {
+        // Si el gancho de servidor `native_lightning_strike` acaba de registrar este mismo rayo
+        // hace pocos milisegundos, afinamos la posición a f64 conservando su instante inicial.
+        if let Some(existing) = lock.as_mut() {
+            if existing.time.elapsed() < Duration::from_millis(250) {
+                existing.pos = pos;
+                return;
+            }
+        }
+        *lock = Some(LightningRecord {
+            pos,
+            time: Instant::now(),
+        });
+    }
+}
+
 /// Obtiene el registro del último rayo si existe.
 pub fn get_last_lightning_strike() -> Option<LightningRecord> {
     LAST_LIGHTNING.lock().ok().and_then(|lock| *lock)
@@ -149,6 +194,257 @@ pub fn get_last_lightning_strike() -> Option<LightningRecord> {
 pub fn clear_lightning_strike() {
     if let Ok(mut lock) = LAST_LIGHTNING.lock() {
         *lock = None;
+    }
+    if let Ok(mut id_lock) = LAST_CLIENT_BOLT_ID.lock() {
+        *id_lock = None;
+    }
+}
+
+fn file_stamp(path: &Path) -> Option<(u64, Option<SystemTime>)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()))
+}
+
+/// Extrae los parámetros de `config` cuyos valores difieren de su valor por defecto en `PARAM_TABLE`.
+pub fn modified_params_from_config(config: &VulpeConfig) -> Vec<LiveAdjustment> {
+    let mut out = Vec::new();
+    for param in PARAM_TABLE {
+        let val = config.get(param.name);
+        if (val - param.default).abs() > 1e-5 {
+            out.push(LiveAdjustment {
+                id: param.id,
+                value: val,
+            });
+        }
+    }
+    out
+}
+
+/// Sincroniza periódicamente (cada 500 ms o al forzar) `config/vulpe-horizon.toml` con:
+/// 1. Los 16 ajustes en vivo de `frame.mods[4..7]` (`mods[0].w`).
+/// 2. El canal fijo `constantes_mod.wgsl` en la carpeta del pack activo (`mods[0].z` bit 4).
+pub fn sync_runtime_state(
+    config_dir: Option<&Path>,
+    active_pack_path: Option<&Path>,
+    force: bool,
+) {
+    let Some(cfg_dir) = config_dir else {
+        return;
+    };
+
+    let now = Instant::now();
+    let pack_buf = active_pack_path
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf);
+
+    let (should_sync, was_initialized) = {
+        let Ok(mut state) = RUNTIME_SYNC.lock() else {
+            return;
+        };
+        let pack_changed = state.last_pack_path != pack_buf;
+        let time_due = state
+            .last_check
+            .is_none_or(|t| now.saturating_duration_since(t) >= RUNTIME_SYNC_INTERVAL);
+
+        if !force && state.initialized && !pack_changed && !time_due {
+            return;
+        }
+        state.last_check = Some(now);
+
+        let cfg_file = cfg_dir.join(config::CONFIG_FILE_NAME);
+        if !cfg_file.exists() {
+            let _ = VulpeConfig::load_or_create(cfg_dir);
+        }
+        let current_stamp = file_stamp(&cfg_file);
+        let stamp_changed = state.last_config_stamp != current_stamp;
+        let was_init = state.initialized;
+
+        state.initialized = true;
+        state.last_config_stamp = current_stamp;
+        state.last_pack_path = pack_buf.clone();
+
+        (force || !was_init || stamp_changed || pack_changed, was_init)
+    };
+
+    if !should_sync {
+        return;
+    }
+
+    let Ok(cfg) = VulpeConfig::load_or_create(cfg_dir) else {
+        return;
+    };
+
+    let modified = modified_params_from_config(&cfg);
+
+    // Actualizar los ajustes en vivo cuando hay parámetros modificados en el TOML,
+    // o cuando el archivo fue editado/forzado tras haber estado inicializado.
+    if !modified.is_empty() || force || was_initialized {
+        if let Ok(mut lock) = LIVE_ADJUSTMENTS.lock() {
+            *lock = modified.clone();
+        }
+    }
+
+    if !modified.is_empty() {
+        if let Some(pack_path) = pack_buf.as_deref() {
+            match write_pack_constants(pack_path, &cfg) {
+                PackWriteResult::Written(_) => set_fixed_channel_active(true),
+                _ => set_fixed_channel_active(false),
+            }
+        } else {
+            set_fixed_channel_active(false);
+        }
+    } else {
+        if let Some(pack_path) = pack_buf.as_deref() {
+            if pack_path.join(CONSTANTS_WGSL_FILENAME).is_file() {
+                let _ = write_pack_constants(pack_path, &cfg);
+            }
+        }
+        set_fixed_channel_active(false);
+    }
+}
+
+/// Procesa comandos del cliente `/vulpe` (API 35: `native_commands` / `native_command`).
+/// Devuelve `Some(respuesta)` si el comando pertenecía a `vulpe`, o `None` en caso contrario.
+pub fn execute_client_command(
+    command: &str,
+    config_dir: Option<&Path>,
+    active_pack_path: Option<&Path>,
+) -> Option<String> {
+    let trimmed = command.trim();
+    if trimmed != "vulpe" && !trimmed.starts_with("vulpe ") {
+        return None;
+    }
+
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    let sub = parts.get(1).copied().unwrap_or("estado");
+
+    match sub {
+        "estado" => {
+            let live = get_live_adjustments();
+            let live_count = live.len().min(MAX_LIVE_ADJUSTMENTS);
+            let fixed = is_fixed_channel_active();
+            let (lightning_active, lightning_info) = match get_last_lightning_strike() {
+                Some(strike) => {
+                    let age = strike.time.elapsed().as_secs_f32();
+                    if age >= 0.0 && age < LIGHTNING_ACTIVE_SECONDS {
+                        (
+                            true,
+                            format!(
+                                "activo (pos=({:.1}, {:.1}, {:.1}), edad={:.2}s)",
+                                strike.pos[0], strike.pos[1], strike.pos[2], age
+                            ),
+                        )
+                    } else {
+                        (false, "inactivo (-1.0s)".to_string())
+                    }
+                }
+                None => (false, "inactivo (-1.0s)".to_string()),
+            };
+            let mut flags = FLAG_TIME_VALID | FLAG_SEASON_VALID;
+            if lightning_active {
+                flags |= FLAG_LIGHTNING_VALID;
+            }
+            if fixed {
+                flags |= FLAG_FIXED_CHANNEL_ACTIVE;
+            }
+            Some(format!(
+                "[Vulpe] mods[0]=({:.0}, {:.0}, {:.0}, {:.0}) | canal_fijo={} | en_vivo={}/16 | rayo={}",
+                FORMAT_HEADER_SIG, PARAM_TABLE_VERSION, flags as f32, live_count as f32, fixed, live_count, lightning_info
+            ))
+        }
+        "ver" => {
+            let Some(&name) = parts.get(2) else {
+                return Some("Uso: /vulpe ver <parámetro>".to_string());
+            };
+            let Some(param) = find_param_by_name(name) else {
+                return Some(format!("[Vulpe] Parámetro desconocido: '{name}'"));
+            };
+            let cfg_val = config_dir
+                .and_then(|d| VulpeConfig::load_or_create(d).ok())
+                .map(|c| c.get(param.name))
+                .unwrap_or(param.default);
+            let live_val = get_live_adjustments()
+                .into_iter()
+                .find(|a| a.id == param.id)
+                .map(|a| a.value);
+            let current = live_val.unwrap_or(cfg_val);
+            let encoded = param.encode_live(current);
+            Some(format!(
+                "[Vulpe] {} (id {}, {}): actual={:.4} (defecto={:.4}, rango={:.4}..={:.4}, vivo={:.0})",
+                param.name, param.id, param.subsystem, current, param.default, param.min, param.max, encoded
+            ))
+        }
+        "poner" => {
+            let (Some(&name), Some(&val_str)) = (parts.get(2), parts.get(3)) else {
+                return Some("Uso: /vulpe poner <parámetro> <valor>".to_string());
+            };
+            let Some(param) = find_param_by_name(name) else {
+                return Some(format!("[Vulpe] Parámetro desconocido: '{name}'"));
+            };
+            let Ok(raw_val) = val_str.parse::<f32>() else {
+                return Some(format!("[Vulpe] Valor numérico inválido: '{val_str}'"));
+            };
+            let clamped = raw_val.clamp(param.min, param.max);
+            if let Some(dir) = config_dir {
+                if let Ok(mut cfg) = VulpeConfig::load_or_create(dir) {
+                    cfg.set(param.name, clamped);
+                    let _ = cfg.save(dir);
+                }
+                sync_runtime_state(Some(dir), active_pack_path, true);
+            } else {
+                set_live_adjustment(param.id, clamped);
+            }
+            let encoded = param.encode_live(clamped);
+            let live_count = get_live_adjustments().len().min(MAX_LIVE_ADJUSTMENTS);
+            let fixed = is_fixed_channel_active();
+            let flags = FLAG_TIME_VALID
+                | FLAG_SEASON_VALID
+                | if fixed { FLAG_FIXED_CHANNEL_ACTIVE } else { 0 };
+            Some(format!(
+                "[Vulpe] {} = {:.4} (id={}, código={:.0}) | banderas={:.0}, en_vivo={}",
+                param.name, clamped, param.id, encoded, flags as f32, live_count
+            ))
+        }
+        "vivo" => {
+            let (Some(&name), Some(&val_str)) = (parts.get(2), parts.get(3)) else {
+                return Some("Uso: /vulpe vivo <parámetro> <valor>".to_string());
+            };
+            let Some(param) = find_param_by_name(name) else {
+                return Some(format!("[Vulpe] Parámetro desconocido: '{name}'"));
+            };
+            let Ok(raw_val) = val_str.parse::<f32>() else {
+                return Some(format!("[Vulpe] Valor numérico inválido: '{val_str}'"));
+            };
+            let clamped = raw_val.clamp(param.min, param.max);
+            set_live_adjustment(param.id, clamped);
+            let encoded = param.encode_live(clamped);
+            let live_count = get_live_adjustments().len().min(MAX_LIVE_ADJUSTMENTS);
+            Some(format!(
+                "[Vulpe] En vivo: {} = {:.4} (id={}, código={:.0}, total_en_vivo={})",
+                param.name, clamped, param.id, encoded, live_count
+            ))
+        }
+        "restablecer" => {
+            let sub_filter = parts.get(2).copied();
+            if let Some(dir) = config_dir {
+                if let Ok(mut cfg) = VulpeConfig::load_or_create(dir) {
+                    for p in PARAM_TABLE {
+                        if sub_filter.is_none_or(|s| p.subsystem == s) {
+                            cfg.set(p.name, p.default);
+                        }
+                    }
+                    let _ = cfg.save(dir);
+                }
+                sync_runtime_state(Some(dir), active_pack_path, true);
+            } else {
+                clear_live_adjustments();
+                set_fixed_channel_active(false);
+            }
+            Some("[Vulpe] Ajustes restablecidos a sus valores por defecto (banderas=5, en_vivo=0).".to_string())
+        }
+        _ => Some(
+            "Comandos Vulpe: /vulpe estado | /vulpe ver <param> | /vulpe poner <param> <valor> | /vulpe vivo <param> <valor> | /vulpe restablecer".to_string(),
+        ),
     }
 }
 
@@ -273,8 +569,13 @@ pub fn populate_shader_params_live(
 mod tests {
     use super::*;
 
+    static TEST_MUTEX: Mutex<()> = Mutex::new(());
+
     #[test]
     fn test_no_clock_gives_zero_flags() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        clear_live_adjustments();
+        set_fixed_channel_active(false);
         let mut params = [[0.0; 4]; 8];
         populate_shader_params(None, 0.0, &mut params);
 
@@ -289,6 +590,9 @@ mod tests {
 
     #[test]
     fn test_day_0_sunrise() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        clear_live_adjustments();
+        set_fixed_channel_active(false);
         let mut params = [[0.0; 4]; 8];
         populate_shader_params(Some(0), 0.0, &mut params);
 
@@ -302,6 +606,9 @@ mod tests {
 
     #[test]
     fn test_day_1_midday() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        clear_live_adjustments();
+        set_fixed_channel_active(false);
         let mut params = [[0.0; 4]; 8];
         // Día 1 al mediodía (24000 + 6000 = 30000 ticks)
         populate_shader_params(Some(30_000), 0.0, &mut params);
@@ -388,7 +695,9 @@ mod tests {
 
     #[test]
     fn test_lightning_strike_relative_to_camera() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         clear_lightning_strike();
+        set_fixed_channel_active(false);
         let mut params = [[0.0; 4]; 8];
 
         // Impacto de rayo en (100.0, 64.0, 200.0)
@@ -412,7 +721,9 @@ mod tests {
 
     #[test]
     fn test_expired_lightning_strike() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         clear_lightning_strike();
+        set_fixed_channel_active(false);
         let mut params = [[0.0; 4]; 8];
 
         // Rayo registrado con fecha pasada (hace 15 segundos)
@@ -431,6 +742,7 @@ mod tests {
 
     #[test]
     fn test_player_state_defaults() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let mut params = [[0.0; 4]; 8];
         populate_shader_params(Some(0), 0.0, &mut params);
         // mods[3] debe ser [0,0,0,0] y bit 3 (8) apagado
@@ -512,6 +824,8 @@ mod tests {
 
     #[test]
     fn test_fixed_channel_flag_in_shader_params() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        clear_lightning_strike();
         set_fixed_channel_active(false);
         let mut params = [[0.0; 4]; 8];
         populate_shader_params(Some(0), 0.0, &mut params);
@@ -525,5 +839,73 @@ mod tests {
         assert_eq!((params[0][2] as u32) & FLAG_FIXED_CHANNEL_ACTIVE, 16);
 
         set_fixed_channel_active(false);
+    }
+
+    #[test]
+    fn test_observe_client_bolt_deduplicates_by_id() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        clear_lightning_strike();
+        set_fixed_channel_active(false);
+
+        observe_client_bolt(42, [180.0, 90.0, 186.0]);
+        let first = get_last_lightning_strike().expect("Debe registrar rayo");
+        assert_eq!(first.pos, [180.0, 90.0, 186.0]);
+
+        // Mismo ID de entidad en fotogramas sucesivos no reinicia el reloj
+        observe_client_bolt(42, [180.0, 90.0, 186.0]);
+        let second = get_last_lightning_strike().unwrap();
+        assert_eq!(first.time, second.time);
+
+        // Nuevo ID de entidad actualiza el rayo
+        observe_client_bolt(43, [200.0, 70.0, 190.0]);
+        let third = get_last_lightning_strike().unwrap();
+        assert_eq!(third.pos, [200.0, 70.0, 190.0]);
+
+        clear_lightning_strike();
+    }
+
+    #[test]
+    fn test_sync_runtime_state_and_commands() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        clear_lightning_strike();
+        clear_live_adjustments();
+        set_fixed_channel_active(false);
+
+        let temp_dir = std::env::temp_dir().join(format!("vulpe_sync_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let cfg_dir = temp_dir.join("config");
+        let pack_dir = temp_dir.join("pack");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::create_dir_all(&pack_dir).unwrap();
+
+        // 1. En reposo: crea config/vulpe-horizon.toml con defaults, banderas = 5, en_vivo = 0
+        sync_runtime_state(Some(&cfg_dir), Some(&pack_dir), true);
+        assert!(cfg_dir.join(config::CONFIG_FILE_NAME).is_file());
+        assert!(!is_fixed_channel_active());
+        assert!(get_live_adjustments().is_empty());
+
+        // 2. Comando /vulpe poner activa tanto canal fijo (constantes_mod.wgsl + bit 4 = 16) como ajuste en vivo
+        let reply = execute_client_command(
+            "vulpe poner cielo_brillo_manual 2.5",
+            Some(&cfg_dir),
+            Some(&pack_dir),
+        );
+        assert!(reply.is_some());
+        assert!(is_fixed_channel_active());
+        assert_eq!(get_live_adjustments().len(), 1);
+        assert!(pack_dir.join(CONSTANTS_WGSL_FILENAME).is_file());
+
+        let mut params = [[0.0; 4]; 8];
+        populate_shader_params_full(Some(0), 0.0, Some([0.0, 0.0, 0.0]), &mut params);
+        assert_eq!(params[0][2], 21.0); // 1 (tiempo) + 4 (estación) + 16 (canal fijo)
+        assert_eq!(params[0][3], 1.0); // 1 ajuste en vivo
+        assert_eq!(params[4][0], 2048.0); // id 0 * 4096 + 2048
+
+        // 3. Comando /vulpe restablecer vuelve a reposo (banderas = 5, en_vivo = 0)
+        let _ = execute_client_command("vulpe restablecer", Some(&cfg_dir), Some(&pack_dir));
+        assert!(!is_fixed_channel_active());
+        assert!(get_live_adjustments().is_empty());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
