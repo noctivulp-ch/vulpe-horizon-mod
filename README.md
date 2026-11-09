@@ -1,97 +1,54 @@
+<div align="center">
+
 # Vulpe para Horizon — mod nativo
 
-Mod nativo de [Horizon](https://github.com/horizon-rust/horizon) que acompaña al shader
-[vulpe-horizon](https://github.com/noctivulp-ch/vulpe-horizon). Le pasa al pack, por `frame.mods` (`array<vec4<f32>, 8>`),
-el ajuste fino que no cabe en las 64 opciones del menú de Horizon y datos del mundo que la API básica de shaders no proporciona.
+**Le da al shader Vulpe datos del mundo y ajustes que el menú de Horizon no tiene sitio para mostrar.**
 
-Este repositorio contiene la implementación del **primer corte (M-01)**:
-- Estructura bundle y crate del mod según `docs/native-mods.md` de Horizon.
-- Gancho `native_shader_params` (API 84) conectado a `frame.mods`.
-- Formato v1 de `frame.mods`: cabecera (firma, tabla, banderas) y datos del mundo (día, fase de luna, estación continua).
-- Pruebas unitarias exhaustivas del motor de cálculo en `engine/`.
+![Licencia](https://img.shields.io/badge/licencia-GPL--3.0--or--later-FF6B00?style=flat-square&labelColor=1A1A1A)
+![Motor](https://img.shields.io/badge/motor-Horizon-3A3A3A?style=flat-square&labelColor=1A1A1A)
+![Estado](https://img.shields.io/badge/estado-en%20desarrollo-FF6B00?style=flat-square&labelColor=1A1A1A)
 
-Licencia: GPL-3.0-or-later ([LICENSE](LICENSE)).
+</div>
 
 ---
 
-## Estructura del repositorio
+## Qué es
 
-```
-vulpe-horizon-mod/
-  ├── horizon-mixin.toml     # Manifiesto del bundle para horizon-mixins (id = "vulpe")
-  ├── shader_params.rs       # Helper privado inyectado en native_shader_params
-  ├── engine/                # Crate propio del mod (miembro del workspace de Horizon)
-  │   ├── Cargo.toml         # Paquete vulpe-engine (edición 2024, sin dependencias externas)
-  │   └── src/lib.rs         # Motor de formato v1 y pruebas unitarias
-  ├── docs/
-  │   └── decisiones.md      # Registro detallado de decisiones de diseño
-  └── README.md
-```
+Un mod nativo de [Horizon](https://github.com/horizon-rust/horizon) que acompaña al shader
+[vulpe-horizon](https://github.com/noctivulp-ch/vulpe-horizon). Horizon permite como mucho 64 opciones por pack y no
+da al shader algunos datos del mundo; el mod se los pasa por `frame.mods`.
 
-Las decisiones técnicas y el diseño detallado se encuentran explicados en [docs/decisiones.md](docs/decisiones.md).
+## Qué hace hoy
 
----
+- Pasa al shader el día del mundo, la fase de la luna y la estación del año.
+- Pronto: el último rayo, el estado del jugador y los ajustes finos del shader.
 
-## Cómo compilar e instalar
+## Puesta en marcha
 
-La compilación se realiza a través de `horizon-launcher` fijado al commit de la versión instalada (`nightly-2026-11-08-fdc87ae`):
+Necesita Horizon con su lanzador. El mod se compila junto al juego:
 
-### 1. Pruebas unitarias del crate
-Se pueden ejecutar las pruebas del motor de cálculo directamente con Cargo:
 ```bash
-cd engine
-cargo test
+horizon-launcher native-build --trust-native-code <ruta-del-repo>
 ```
 
-### 2. Compilación del mod nativo con Horizon Launcher
-```bash
-horizon-launcher native-build \
-  --trust-native-code \
-  <ruta-del-repo>
-```
+Detalle, perfiles de compilación y cómo comprobar que funciona: [`docs/guia.md`](docs/guia.md). Decisiones de
+diseño: [`docs/decisiones.md`](docs/decisiones.md).
 
-Opcionalmente, se puede especificar el perfil de compilación:
-- `--profile performance` (por defecto): compilación incremental optimizada para jugar.
-- `--profile dev`: iteración más rápida de desarrollo.
-- `--profile release`: optimización máxima con LTO delgado.
+## Licencia
 
-### 3. Dónde queda el artefacto
-`horizon-launcher native-build` compila el juego con el mod integrado en el directorio de datos del launcher:
-- **Caché y artefactos de compilación:** `~/.local/share/horizon-launcher/native/target/`
-- **Juego instalado para la instancia:** `~/.local/share/horizon-launcher/versions/native-<id>/`
-- La instancia seleccionada queda automáticamente configurada para jugar esta versión construida.
+Código bajo **GPL-3.0-or-later** ([`LICENSE`](LICENSE)). Los componentes de terceros y sus licencias
+están en [`NOTICE`](NOTICE). El nombre y la identidad visual no forman parte de la licencia: ver
+[`TRADEMARKS.md`](TRADEMARKS.md). Para aportar, [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+## Apoyo
+
+Este proyecto forma parte del trabajo de **NoctiVulp**: herramientas para Linux y Android,
+publicadas como software libre. Las compilaciones oficiales y las novedades salen en Patreon.
+
+<p align="center">
+  <a href="https://www.patreon.com/cw/NoctiVulp"><img src="https://img.shields.io/badge/Patreon-NoctiVulp-FF6B00?style=for-the-badge&logo=patreon&logoColor=white&labelColor=1A1A1A" alt="NoctiVulp en Patreon"></a>
+</p>
 
 ---
 
-## Cómo comprobar `frame.mods` en el juego
-
-El gestor puede verificar que el mod está activo e inyectando datos correctamente inspeccionando los componentes de `frame.mods` en el shader.
-
-### Valores esperados de `frame.mods` (Formato v1)
-
-#### En la pantalla de título (sin mundo cargado)
-- `frame.mods[0] = vec4(1001.0, 1.0, 0.0, 0.0)`
-  - `x = 1001.0`: Firma de formato v1 presente.
-  - `y = 1.0`: Versión de tabla de parámetros 1.
-  - `z = 0.0`: Banderas en 0 (sin reloj disponible).
-  - `w = 0.0`: 0 ajustes en vivo en uso.
-- `frame.mods[1] = vec4(0.0, 0.0, 0.0, 0.0)`
-- `frame.mods[2] = vec4(0.0, 0.0, 0.0, -1.0)` (edad negativa = sin rayo).
-
-#### En un mundo cargado según el día y la hora
-
-| Escenario | Comando | `frame.mods[0]` (Cabecera) | `frame.mods[1]` (Tiempo y Estación) |
-|---|---|---|---|
-| **Día 0, amanecer** | `/time set 0` | `(1001.0, 1.0, 5.0, 0.0)` | `(0.0, 0.0, 0.000, 0.0)` — Día 0, Luna Llena (0), Inicio Primavera |
-| **Día 0, noche** | `/time set 18000` | `(1001.0, 1.0, 5.0, 0.0)` | `(0.0, 0.0, 0.031, 0.0)` — Día 0, Luna Llena (0), Primavera avanzando |
-| **Día 1, amanecer** | `/time set 24000` | `(1001.0, 1.0, 5.0, 0.0)` | `(1.0, 1.0, 0.042, 0.0)` — Día 1, Gibosa Menguante (1) |
-| **Día 4, amanecer** | `/time set 96000` | `(1001.0, 1.0, 5.0, 0.0)` | `(4.0, 4.0, 0.167, 0.0)` — Día 4, Luna Nueva (4) |
-| **Día 24, amanecer** | `/time set 576000` | `(1001.0, 1.0, 5.0, 0.0)` | `(24.0, 0.0, 1.000, 0.0)` — Día 24, Luna Llena (0), Inicio Verano (1.0) |
-| **Día 48, amanecer** | `/time set 1152000` | `(1001.0, 1.0, 5.0, 0.0)` | `(48.0, 0.0, 2.000, 0.0)` — Día 48, Luna Llena (0), Inicio Otoño (2.0) |
-| **Día 72, amanecer** | `/time set 1728000` | `(1001.0, 1.0, 5.0, 0.0)` | `(72.0, 0.0, 3.000, 0.0)` — Día 72, Luna Llena (0), Inicio Invierno (3.0) |
-| **Día 96, amanecer** | `/time set 2304000` | `(1001.0, 1.0, 5.0, 0.0)` | `(96.0, 0.0, 0.000, 0.0)` — Día 96, Ciclo completo, Vuelve a Primavera (0.0) |
-
-- **Banderas (`mods[0].z = 5.0`):** `1` (Bit 0: datos de tiempo válidos) + `4` (Bit 2: estación válida) = `5.0`.
-- **Rayo (`mods[2]`):** `vec4(0.0, 0.0, 0.0, -1.0)` constante en este corte.
-- **Jugador (`mods[3]`):** `vec4(0.0, 0.0, 0.0, 0.0)` con bandera en 0 (el shader no lo lee).
-- **Ajustes en vivo (`mods[4..7]`):** Todos en `0.0`.
+<p align="center"><sub>© 2026 NoctiVulp · <b>Powered by AI</b> — desarrollado con la asistencia de Claude, de Anthropic.</sub></p>
