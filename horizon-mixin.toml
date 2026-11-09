@@ -54,6 +54,17 @@ bindings = [
     { name = "ran", ty = "&mut bool", value = "ran" },
 ]
 
+# Gancho nativo por fotograma para seleccionar la carpeta desempaquetada (Forma C)
+[[injection]]
+id = "frame"
+hook = "frame"
+hook_version = 1
+kind = "HEAD"
+helper = "frame.rs"
+bindings = [
+    { name = "game", ty = "&mut crate::game::Game<'_>", value = "self" },
+]
+
 # Crate propio del mod: lógica central y motor de cálculo de parámetros
 [[crate]]
 id = "engine"

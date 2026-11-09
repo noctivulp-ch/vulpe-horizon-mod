@@ -6,10 +6,12 @@ pub mod config;
 pub mod constants;
 pub mod table;
 
-pub use config::VulpeConfig;
+pub use config::{FixedChannelMode, VulpeConfig};
 pub use constants::{
-    CONSTANTS_WGSL_FILENAME, PACK_MANIFEST_FILENAME, PackWriteResult, generate_constants_wgsl,
-    generate_full_constants_wgsl, write_pack_constants,
+    CONSTANTS_WGSL_FILENAME, PACK_MANIFEST_FILENAME, PackWriteResult, UNPACKED_PACK_DIR_NAME,
+    UNPACKED_PACK_KEY, UNPACKED_STAMP_FILENAME, ensure_unpacked_hshader, find_source_hshader_in_dir,
+    generate_constants_wgsl, generate_default_constants_wgsl, generate_full_constants_wgsl,
+    is_hshader_path, write_pack_constants, write_pack_constants_with_mode,
 };
 pub use table::{ParamDef, PARAM_TABLE, find_param_by_id, find_param_by_name};
 
@@ -67,6 +69,50 @@ static LAST_LIGHTNING: Mutex<Option<LightningRecord>> = Mutex::new(None);
 static LAST_CLIENT_BOLT_ID: Mutex<Option<u32>> = Mutex::new(None);
 static LIVE_ADJUSTMENTS: Mutex<Vec<LiveAdjustment>> = Mutex::new(Vec::new());
 static FIXED_CHANNEL_ACTIVE: Mutex<bool> = Mutex::new(false);
+static PENDING_UNPACKED_PACK_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+static PENDING_PACK_REVERT: Mutex<bool> = Mutex::new(false);
+
+/// Obtiene y consume (si existe) la ruta de la carpeta desempaquetada (`shaderpacks/vulpe-mod/`)
+/// que la Forma C solicita seleccionar como pack activo en el cliente.
+pub fn take_pending_unpacked_pack_path() -> Option<PathBuf> {
+    PENDING_UNPACKED_PACK_PATH
+        .lock()
+        .ok()
+        .and_then(|mut lock| lock.take())
+}
+
+/// Consulta sin consumir la última carpeta desempaquetada registrada por la Forma C.
+pub fn peek_pending_unpacked_pack_path() -> Option<PathBuf> {
+    PENDING_UNPACKED_PACK_PATH
+        .lock()
+        .ok()
+        .and_then(|lock| lock.clone())
+}
+
+fn set_pending_unpacked_pack_path(path: Option<PathBuf>) {
+    if let Ok(mut lock) = PENDING_UNPACKED_PACK_PATH.lock() {
+        *lock = path;
+    }
+}
+
+/// Obtiene y consume si el modo B solicita revertir `horizon:vulpe_mod` de vuelta a `horizon:vulpe`.
+pub fn take_pending_pack_revert() -> bool {
+    PENDING_PACK_REVERT
+        .lock()
+        .ok()
+        .map(|mut lock| {
+            let v = *lock;
+            *lock = false;
+            v
+        })
+        .unwrap_or(false)
+}
+
+fn set_pending_pack_revert(revert: bool) {
+    if let Ok(mut lock) = PENDING_PACK_REVERT.lock() {
+        *lock = revert;
+    }
+}
 
 const RUNTIME_SYNC_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -75,6 +121,7 @@ struct RuntimeSyncState {
     initialized: bool,
     last_check: Option<Instant>,
     last_config_stamp: Option<(u64, Option<SystemTime>)>,
+    last_hshader_stamp: Option<(u64, Option<SystemTime>)>,
     last_pack_path: Option<PathBuf>,
 }
 
@@ -82,6 +129,7 @@ static RUNTIME_SYNC: Mutex<RuntimeSyncState> = Mutex::new(RuntimeSyncState {
     initialized: false,
     last_check: None,
     last_config_stamp: None,
+    last_hshader_stamp: None,
     last_pack_path: None,
 });
 
@@ -257,13 +305,30 @@ pub fn sync_runtime_state(
         }
         let current_stamp = file_stamp(&cfg_file);
         let stamp_changed = state.last_config_stamp != current_stamp;
+
+        let hshader_stamp = pack_buf.as_deref().and_then(|p| {
+            if is_hshader_path(p) || p.is_file() {
+                file_stamp(p)
+            } else if p.file_name().and_then(|n| n.to_str()) == Some(UNPACKED_PACK_DIR_NAME) {
+                p.parent()
+                    .and_then(find_source_hshader_in_dir)
+                    .and_then(|src| file_stamp(&src))
+            } else {
+                None
+            }
+        });
+        let hshader_changed = state.last_hshader_stamp != hshader_stamp;
         let was_init = state.initialized;
 
         state.initialized = true;
         state.last_config_stamp = current_stamp;
+        state.last_hshader_stamp = hshader_stamp;
         state.last_pack_path = pack_buf.clone();
 
-        (force || !was_init || stamp_changed || pack_changed, was_init)
+        (
+            force || !was_init || stamp_changed || hshader_changed || pack_changed,
+            was_init,
+        )
     };
 
     if !should_sync {
@@ -287,17 +352,61 @@ pub fn sync_runtime_state(
     if !modified.is_empty() {
         if let Some(pack_path) = pack_buf.as_deref() {
             match write_pack_constants(pack_path, &cfg) {
-                PackWriteResult::Written(_) => set_fixed_channel_active(true),
-                _ => set_fixed_channel_active(false),
+                PackWriteResult::Written(_) => {
+                    set_pending_unpacked_pack_path(None);
+                    set_pending_pack_revert(false);
+                    set_fixed_channel_active(true);
+                }
+                PackWriteResult::UnpackedAndWritten { unpacked_dir, .. } => {
+                    set_pending_unpacked_pack_path(Some(unpacked_dir));
+                    set_pending_pack_revert(false);
+                    set_fixed_channel_active(true);
+                }
+                PackWriteResult::PackedArchive(_) => {
+                    set_pending_unpacked_pack_path(None);
+                    let is_unpacked = pack_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n == UNPACKED_PACK_DIR_NAME);
+                    set_pending_pack_revert(is_unpacked);
+                    set_fixed_channel_active(false);
+                }
+                _ => {
+                    set_pending_unpacked_pack_path(None);
+                    set_pending_pack_revert(false);
+                    set_fixed_channel_active(false);
+                }
             }
         } else {
+            set_pending_unpacked_pack_path(None);
+            set_pending_pack_revert(false);
             set_fixed_channel_active(false);
         }
     } else {
         if let Some(pack_path) = pack_buf.as_deref() {
-            if pack_path.join(CONSTANTS_WGSL_FILENAME).is_file() {
-                let _ = write_pack_constants(pack_path, &cfg);
+            if is_hshader_path(pack_path) || pack_path.is_file() {
+                if let PackWriteResult::UnpackedAndWritten { unpacked_dir, .. } =
+                    write_pack_constants(pack_path, &cfg)
+                {
+                    set_pending_unpacked_pack_path(Some(unpacked_dir));
+                    set_pending_pack_revert(false);
+                } else {
+                    set_pending_unpacked_pack_path(None);
+                }
+            } else {
+                let is_unpacked = pack_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n == UNPACKED_PACK_DIR_NAME);
+                if is_unpacked && cfg.canal_fijo == FixedChannelMode::B {
+                    set_pending_pack_revert(true);
+                } else if pack_path.join(CONSTANTS_WGSL_FILENAME).is_file() || is_unpacked {
+                    let _ = write_pack_constants(pack_path, &cfg);
+                }
+                set_pending_unpacked_pack_path(None);
             }
+        } else {
+            set_pending_unpacked_pack_path(None);
         }
         set_fixed_channel_active(false);
     }
@@ -347,9 +456,46 @@ pub fn execute_client_command(
             if fixed {
                 flags |= FLAG_FIXED_CHANNEL_ACTIVE;
             }
+            let modo_cfg = config_dir
+                .and_then(|d| VulpeConfig::load_or_create(d).ok())
+                .map(|c| c.canal_fijo.as_str())
+                .unwrap_or("auto");
             Some(format!(
-                "[Vulpe] mods[0]=({:.0}, {:.0}, {:.0}, {:.0}) | canal_fijo={} | en_vivo={}/16 | rayo={}",
-                FORMAT_HEADER_SIG, PARAM_TABLE_VERSION, flags as f32, live_count as f32, fixed, live_count, lightning_info
+                "[Vulpe] mods[0]=({:.0}, {:.0}, {:.0}, {:.0}) | canal_fijo={} (modo={}) | en_vivo={}/16 | rayo={}",
+                FORMAT_HEADER_SIG, PARAM_TABLE_VERSION, flags as f32, live_count as f32, fixed, modo_cfg, live_count, lightning_info
+            ))
+        }
+        "modo" => {
+            let Some(&mode_str) = parts.get(2) else {
+                let current = config_dir
+                    .and_then(|d| VulpeConfig::load_or_create(d).ok())
+                    .map(|c| c.canal_fijo.as_str())
+                    .unwrap_or("auto");
+                return Some(format!(
+                    "[Vulpe] Modo de canal fijo actual: '{current}'. Uso: /vulpe modo <b|c|auto>"
+                ));
+            };
+            let Some(mode) = FixedChannelMode::from_str_opt(mode_str) else {
+                return Some(format!(
+                    "[Vulpe] Modo inválido: '{mode_str}'. Use 'b', 'c' o 'auto'."
+                ));
+            };
+            if let Some(dir) = config_dir {
+                if let Ok(mut cfg) = VulpeConfig::load_or_create(dir) {
+                    cfg.canal_fijo = mode;
+                    let _ = cfg.save(dir);
+                }
+                sync_runtime_state(Some(dir), active_pack_path, true);
+            }
+            let fixed = is_fixed_channel_active();
+            let flags = FLAG_TIME_VALID
+                | FLAG_SEASON_VALID
+                | if fixed { FLAG_FIXED_CHANNEL_ACTIVE } else { 0 };
+            Some(format!(
+                "[Vulpe] Modo de canal fijo cambiado a '{}' | canal_fijo={} | banderas={:.0}",
+                mode.as_str(),
+                fixed,
+                flags as f32
             ))
         }
         "ver" => {
@@ -443,7 +589,7 @@ pub fn execute_client_command(
             Some("[Vulpe] Ajustes restablecidos a sus valores por defecto (banderas=5, en_vivo=0).".to_string())
         }
         _ => Some(
-            "Comandos Vulpe: /vulpe estado | /vulpe ver <param> | /vulpe poner <param> <valor> | /vulpe vivo <param> <valor> | /vulpe restablecer".to_string(),
+            "Comandos Vulpe: /vulpe estado | /vulpe modo <b|c|auto> | /vulpe ver <param> | /vulpe poner <param> <valor> | /vulpe vivo <param> <valor> | /vulpe restablecer".to_string(),
         ),
     }
 }

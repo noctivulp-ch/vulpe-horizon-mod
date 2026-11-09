@@ -26,6 +26,7 @@ vulpe-horizon-mod/
   ├── lightning_strike.rs    # Helper privado inyectado en native_lightning_strike
   ├── commands.rs            # Helper privado inyectado en native_commands (API 35)
   ├── command.rs             # Helper privado inyectado en native_command (API 35)
+  ├── frame.rs               # Helper privado inyectado en native_frame (selección de pack en Forma C)
   ├── engine/                # Crate propio del mod (miembro del workspace de Horizon)
   │   ├── Cargo.toml         # Paquete vulpe-engine (edición 2024, sin dependencias externas)
   │   └── src/               # Motor de formato v1, tabla, configuración, constantes y pruebas
@@ -135,32 +136,40 @@ El gestor puede verificar que el mod está activo e inyectando datos correctamen
 
 ---
 
-## 2. Cómo activar y comprobar el canal fijo (`constantes_mod.wgsl`)
+## 2. Cómo activar y comprobar el canal fijo (`constantes_mod.wgsl`) en las Formas B y C
 
-El canal fijo se activa automáticamente al modificar cualquier parámetro respecto a su valor por defecto, ya sea **desde el chat del juego** con `/vulpe poner` o **editando el archivo `config/vulpe-horizon.toml`** en la carpeta de la instancia (el mod lo crea en el primer arranque y lo vigila cada 500 ms).
+En `config/vulpe-horizon.toml` (o con `/vulpe modo <b|c|auto>`) se puede elegir cómo opera el canal fijo:
+- `canal_fijo = "b"` (**Forma B, archivo de serie**): solo sobrescribe `constantes_mod.wgsl` dentro de un pack en carpeta, sin tocar nunca `horizon-shaders.toml` (el pack ya trae `constantes_mod.wgsl` registrado de serie). No desempaqueta archivos `.hshader`.
+- `canal_fijo = "c"` (**Forma C, desempaquetar**): si el pack activo es un `.hshader` en `shaderpacks/`, lo descomprime en `shaderpacks/vulpe-mod/`, selecciona esa carpeta como pack activo (`horizon:vulpe_mod`) y escribe allí `constantes_mod.wgsl`. Si el `.hshader` se actualiza, `shaderpacks/vulpe-mod/` se regenera automáticamente.
+- `canal_fijo = "auto"` (**Por defecto**): usa la Forma C si el pack activo es un `.hshader` y la Forma B si es una carpeta.
 
-### Vía A — Desde el chat del juego:
-1. Ejecuta en el chat:
+### Comprobación de la Forma B (pack en carpeta):
+1. Con el pack en carpeta (`shaderpacks/vulpe/`) activo, ejecuta en el chat:
    ```mcfunction
+   /vulpe modo b
    /vulpe poner cielo_brillo_manual 2.5
    ```
-2. **Qué ocurre y valores esperados:**
-   - Se actualiza `config/vulpe-horizon.toml` con `cielo_brillo_manual = 2.5000`.
-   - En la carpeta del shader pack activo (`shaderpacks/<pack>/`) se escribe `constantes_mod.wgsl` con:
-     ```wgsl
-     const VULPE_PARAM_TABLE_VERSION: f32 = 1.0;
-     const VULPE_FIXED_CHANNEL_ACTIVE: bool = true;
+2. **Qué archivo aparece y valores esperados:**
+   - Se sobrescribe `shaderpacks/vulpe/constantes_mod.wgsl` con `VULPE_FIXED_CHANNEL_ACTIVE = true` y `VULPE_CIELO_BRILLO_MANUAL = 2.50000`.
+   - El manifiesto `shaderpacks/vulpe/horizon-shaders.toml` **no se modifica**.
+   - `frame.mods[0].z` vale **`21.0`** (`1` tiempo + `4` estación + `16` canal fijo), o **`23.0`** con rayo activo.
+   - Si el pack activo fuera un `.hshader` en modo `b`, no se crea ninguna carpeta, `constantes_mod.wgsl` no se escribe y `frame.mods[0].z` permanece en **`5.0`** (actuando solo el ajuste en vivo `frame.mods[0].w = 1.0`).
 
-     // Brillo manual del cielo (defecto: 1)
-     const VULPE_CIELO_BRILLO_MANUAL: f32 = 2.50000;
-     ```
-   - Si `horizon-shaders.toml` del pack no incluía aún `"constantes_mod.wgsl"` en `shared`, el mod lo añade automáticamente para que Horizon valide y recargue el pack en caliente a los 500 ms (`Shader pack ... reloaded`).
-   - En `frame.mods`:
-     - `frame.mods[0].z` pasa de `5.0` a **`21.0`** (`1` tiempo + `4` estación + `16` canal fijo), o **`23.0`** si hay un rayo activo.
+### Comprobación de la Forma C (pack `.hshader` de release):
+1. Con el archivo `.hshader` en `shaderpacks/` seleccionado como pack activo, ejecuta en el chat:
+   ```mcfunction
+   /vulpe modo c
+   /vulpe poner cielo_brillo_manual 2.5
+   ```
+2. **Qué archivo aparece y valores esperados:**
+   - Aparece la carpeta desempaquetada `shaderpacks/vulpe-mod/` con la huella `.vulpe-hshader-stamp` y el archivo `shaderpacks/vulpe-mod/constantes_mod.wgsl` (`VULPE_FIXED_CHANNEL_ACTIVE = true`, `VULPE_CIELO_BRILLO_MANUAL = 2.50000`).
+   - El mod selecciona automáticamente `shaderpacks/vulpe-mod/` (`horizon:vulpe_mod`) como pack activo en Horizon.
+   - `frame.mods[0].z` vale **`21.0`** (`1` tiempo + `4` estación + `16` canal fijo), o **`23.0`** con rayo activo.
+   - Si se reemplaza o actualiza el archivo `.hshader` en `shaderpacks/`, en el siguiente ciclo de sincronización (≤ 500 ms) `shaderpacks/vulpe-mod/` se regenera automáticamente conservando `constantes_mod.wgsl` actualizado.
 
-### Vía B — Editando `config/vulpe-horizon.toml` en disco:
-1. Abre `config/vulpe-horizon.toml` en la carpeta `config/` de la instancia y cambia por ejemplo `cielo_brillo_manual = 2.5000`.
-2. Guarda el archivo: en menos de 500 ms el mod detecta el cambio, escribe `constantes_mod.wgsl` en el pack activo y `frame.mods[0].z` pasa a **`21.0`**.
+### Editando `config/vulpe-horizon.toml` en disco:
+1. Abre `config/vulpe-horizon.toml` en la carpeta `config/` de la instancia, ajusta `canal_fijo = "b"`, `"c"` o `"auto"` y cambia por ejemplo `cielo_brillo_manual = 2.5000`.
+2. Guarda el archivo: en menos de 500 ms el mod detecta el cambio, aplica la forma configurada y `frame.mods[0].z` pasa a **`21.0`**.
 
 ---
 

@@ -80,3 +80,25 @@ En `M-02`, las funciones `VulpeConfig::load_or_create`, `write_pack_constants`, 
      - **Canal en vivo (`mods[0].w` y `mods[4..7]`):** Los parámetros modificados respecto a su valor por defecto (hasta los primeros 16 por orden de tabla) se codifican inmediatamente como `id × 4096 + q` en `frame.mods[4..7]`, y `frame.mods[0].w` refleja su cantidad (`1.0` a `16.0`).
      - **Canal fijo (`constantes_mod.wgsl` y Bit 4 en `mods[0].z`):** Si el pack activo reside en una carpeta escribible, `write_pack_constants` escribe `constantes_mod.wgsl`, asegura que `"constantes_mod.wgsl"` figure en la lista `shared` de `horizon-shaders.toml` del pack para que el validador de Horizon lo compile y recargue en caliente en 500 ms, y enciende el Bit 4 (`+16.0`) en `frame.mods[0].z` (`21.0` en reposo o `23.0` con rayo activo). Si el pack es un archivo comprimido `.hshader`, el Bit 4 permanece apagado y los cambios actúan por el canal en vivo.
 - **Comandos del cliente `/vulpe` (API 35: `native_commands` y `native_command`):** Se inyectaron los ayudantes `commands.rs` y `command.rs` para permitir inspeccionar y activar ambos canales directamente desde el chat del juego (`/vulpe estado`, `/vulpe ver <parámetro>`, `/vulpe poner <parámetro> <valor>`, `/vulpe vivo <parámetro> <valor>`, `/vulpe restablecer`).
+
+---
+
+## 5. Dos formas para el canal fijo y soporte para `.hshader` (C-05)
+
+El diseño de `C-04` editaba el manifiesto `horizon-shaders.toml` del pack del jugador y no podía escribir el canal fijo cuando el pack activo era el archivo empaquetado `.hshader` de la release. En `C-05` se implementan dos formas seleccionables en `config/vulpe-horizon.toml` mediante `canal_fijo = "b" | "c" | "auto"` (y en vivo con `/vulpe modo <b|c|auto>`):
+
+### 5.1 Forma B (`canal_fijo = "b"`, archivo de serie)
+- **En el shader (`vulpe-horizon`):** El pack incluye de serie `constantes_mod.wgsl` en su raíz con los 38 parámetros en sus valores por defecto y `VULPE_FIXED_CHANNEL_ACTIVE = false`, ya registrado como primer elemento de `shared` en `horizon-shaders.toml`. Sin el mod, o con el canal fijo apagado, el shader produce un resultado visual idéntico bit a bit.
+- **En el mod (`vulpe-horizon-mod`):** En modo `b`, el mod únicamente sobrescribe `constantes_mod.wgsl` dentro de la carpeta del pack y **jamás toca `horizon-shaders.toml`**. Solo funciona cuando el pack activo está en carpeta; si el pack activo es un `.hshader`, el canal fijo permanece apagado (`mods[0].z = 5.0`) y los cambios actúan únicamente por el canal en vivo (`mods[4..7]`).
+
+### 5.2 Forma C (`canal_fijo = "c"`, desempaquetar en `shaderpacks/vulpe-mod/`)
+- **Desempaquetado y regeneración automática:** Cuando el pack activo es un archivo `.hshader`, el mod calcula la huella del archivo (nombre, tamaño y hash de contenido) y lo descomprime una sola vez en `shaderpacks/vulpe-mod/`, guardando la huella en `.vulpe-hshader-stamp` (archivo oculto con prefijo `.`, ignorado por el escáner `read_dir` de `horizon-shader-api`). Si el `.hshader` se actualiza en disco, la diferencia de huella hace que el mod regenere `shaderpacks/vulpe-mod/` automáticamente y vuelva a escribir `constantes_mod.wgsl`.
+- **Cómo se elige el pack activo desde un mod en Horizon (`docs/native-mods.md` y API de `Game`):**
+  - En `docs/native-mods.md` (§ *Bundling a shader pack*) y en `crates/horizon-client/src/game/native_hooks.rs`, la interfaz `Host` para mods trait no expone ningún método público `native_set_shader_pack(...)`; la documentación oficial solo contempla empaquetar una carpeta `native-<mod-id>` cuya activación sigue el interruptor *Mods On/Off*.
+  - Sin embargo, al ser `vulpe` un *mixin bundle* compilado dentro de `horizon_client::game::Game`, los ayudantes con acceso a `&mut Game` (`command.rs` en `hook = "command"` y `frame.rs` en `hook = "frame"`) pueden cambiar el pack activo directamente igual que la pantalla *Options > Shader Packs* (`crates/horizon-client/src/game/options.rs`):
+    1. En la copia desempaquetada `shaderpacks/vulpe-mod/horizon-shaders.toml`, el mod asigna `id = "vulpe_mod"` para evitar que `shader_pack_list::resolve` colisione por orden léxico con el archivo `vulpe-<versión>.hshader` (`id = "vulpe"`).
+    2. El ayudante actualiza `game.settings.horizon.shader_pack = "horizon:vulpe_mod"`, persiste la elección con `game.settings.save(&Game::options_path())` y llama a `game.native_shaders.select(...)` apuntando a `shaderpacks/vulpe-mod`.
+    3. *Nota sobre `HORIZON_SHADER_PACK`:* Si el juego se lanza con la variable de entorno de desarrollo `HORIZON_SHADER_PACK` definida, `shader_packs::picked_pack` prioriza siempre esa variable (`OnceLock`) sobre `settings.horizon.shader_pack`. Por tanto, para que el cambio automático de pack de la Forma C surta efecto en el juego, el `.hshader` debe estar seleccionado como pack normal en `shaderpacks/` (sin forzar `HORIZON_SHADER_PACK` a otra ruta).
+
+### 5.3 Modo `auto` (por defecto)
+- Elige automáticamente la **Forma C** si el pack activo es un archivo `.hshader` (o si ya está seleccionada la carpeta `shaderpacks/vulpe-mod/`) y la **Forma B** si el pack activo es una carpeta normal.

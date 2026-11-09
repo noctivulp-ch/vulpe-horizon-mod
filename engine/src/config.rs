@@ -1,7 +1,8 @@
 //! Gestión de la configuración del mod nativo (config/vulpe-horizon.toml).
 //!
-//! Lee y escribe archivos TOML sin dependencias externas, asegurando formato v1
-//! y valores por defecto para todos los parámetros de la tabla.
+//! Lee y escribe archivos TOML sin dependencias externas, asegurando formato v1,
+//! el modo del canal fijo (`b`, `c` o `auto`) y valores por defecto para todos los
+//! parámetros de la tabla.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -12,10 +13,48 @@ use crate::table::{PARAM_TABLE, find_param_by_name};
 /// Nombre estándar del archivo de configuración del mod.
 pub const CONFIG_FILE_NAME: &str = "vulpe-horizon.toml";
 
+/// Modo de operación del canal fijo (`constantes_mod.wgsl`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FixedChannelMode {
+    /// Forma B (archivo de serie): sobrescribe `constantes_mod.wgsl` en la carpeta del pack sin tocar `horizon-shaders.toml`. Solo sirve con el pack en carpeta.
+    B,
+    /// Forma C (desempaquetar): si el pack es un `.hshader`, lo descomprime en `shaderpacks/vulpe-mod/`, lo selecciona como activo y escribe allí `constantes_mod.wgsl`.
+    C,
+    /// Automático (por defecto): usa C si el pack activo es un `.hshader` (o ya es `vulpe-mod/`) y B si es una carpeta.
+    #[default]
+    Auto,
+}
+
+impl FixedChannelMode {
+    /// Parsea el modo desde una cadena (`"b"`, `"c"`, `"auto"`).
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        let clean = s.trim().trim_matches('"').trim_matches('\'');
+        if clean.eq_ignore_ascii_case("b") {
+            Some(Self::B)
+        } else if clean.eq_ignore_ascii_case("c") {
+            Some(Self::C)
+        } else if clean.eq_ignore_ascii_case("auto") {
+            Some(Self::Auto)
+        } else {
+            None
+        }
+    }
+
+    /// Representación textual en `config/vulpe-horizon.toml`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::B => "b",
+            Self::C => "c",
+            Self::Auto => "auto",
+        }
+    }
+}
+
 /// Configuración de ajustes finos del jugador para Vulpe.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VulpeConfig {
     pub formato: u32,
+    pub canal_fijo: FixedChannelMode,
     pub values: BTreeMap<String, f32>,
 }
 
@@ -25,7 +64,11 @@ impl Default for VulpeConfig {
         for param in PARAM_TABLE {
             values.insert(param.name.to_string(), param.default);
         }
-        Self { formato: 1, values }
+        Self {
+            formato: 1,
+            canal_fijo: FixedChannelMode::Auto,
+            values,
+        }
     }
 }
 
@@ -91,6 +134,18 @@ impl VulpeConfig {
                     continue;
                 }
 
+                if key == "canal_fijo" || key == "modo_canal_fijo" {
+                    let mode = FixedChannelMode::from_str_opt(clean_val).ok_or_else(|| {
+                        format!(
+                            "Línea {}: modo de canal fijo inválido '{}' (use \"b\", \"c\" o \"auto\")",
+                            line_idx + 1,
+                            clean_val
+                        )
+                    })?;
+                    config.canal_fijo = mode;
+                    continue;
+                }
+
                 if let Some(param) = find_param_by_name(key) {
                     let num: f32 = clean_val.parse().map_err(|e| {
                         format!(
@@ -112,7 +167,9 @@ impl VulpeConfig {
         let mut out = String::new();
         out.push_str("# Archivo de configuración del mod nativo de Vulpe para Horizon\n");
         out.push_str("# Ajustes finos que acompañan al pack de shaders vulpe-horizon\n");
-        out.push_str(&format!("formato = {}\n\n", self.formato));
+        out.push_str(&format!("formato = {}\n", self.formato));
+        out.push_str("# Modo del canal fijo: \"b\" (archivo de serie en carpeta), \"c\" (desempaquetar .hshader en shaderpacks/vulpe-mod/) o \"auto\"\n");
+        out.push_str(&format!("canal_fijo = \"{}\"\n\n", self.canal_fijo.as_str()));
 
         // Agrupar por subsistema según el orden de la tabla
         let mut subsystems: Vec<&'static str> = Vec::new();
@@ -180,6 +237,7 @@ mod tests {
     fn test_default_config_has_format_1_and_defaults() {
         let cfg = VulpeConfig::default();
         assert_eq!(cfg.formato, 1);
+        assert_eq!(cfg.canal_fijo, FixedChannelMode::Auto);
         assert_eq!(cfg.get("cielo_brillo_manual"), 1.0);
         assert_eq!(cfg.get("aurora_radio"), 300.0);
         assert_eq!(cfg.get("balance_blancos_k"), 6500.0);
@@ -188,6 +246,7 @@ mod tests {
     #[test]
     fn test_toml_roundtrip() {
         let mut cfg = VulpeConfig::default();
+        cfg.canal_fijo = FixedChannelMode::B;
         cfg.set("cielo_brillo_manual", 2.5);
         cfg.set("aurora_radio", 500.0);
 
@@ -195,6 +254,7 @@ mod tests {
         let parsed = VulpeConfig::from_toml_str(&toml_str).expect("Debe parsear");
 
         assert_eq!(parsed.formato, 1);
+        assert_eq!(parsed.canal_fijo, FixedChannelMode::B);
         assert!((parsed.get("cielo_brillo_manual") - 2.5).abs() < 1e-4);
         assert!((parsed.get("aurora_radio") - 500.0).abs() < 1e-4);
         assert_eq!(parsed.get("balance_blancos_k"), 6500.0); // No modificado, debe conservar default
@@ -204,6 +264,7 @@ mod tests {
     fn test_parse_partial_toml() {
         let toml = r#"
         formato = 1
+        canal_fijo = "c"
 
         [cielo]
         cielo_brillo_manual = 3.2 # Ajuste personalizado
@@ -214,6 +275,7 @@ mod tests {
 
         let parsed = VulpeConfig::from_toml_str(toml).expect("Debe parsear");
         assert_eq!(parsed.formato, 1);
+        assert_eq!(parsed.canal_fijo, FixedChannelMode::C);
         assert!((parsed.get("cielo_brillo_manual") - 3.2).abs() < 1e-4);
         assert!((parsed.get("aurora_velo") - 2.0).abs() < 1e-4);
         assert_eq!(parsed.get("aurora_radio"), 300.0); // Omitido, usa default
@@ -238,15 +300,18 @@ mod tests {
         // Archivo no existe: debe crear y retornar default
         let loaded = VulpeConfig::load_or_create(&temp_dir).expect("Debe crear");
         assert_eq!(loaded.get("cielo_brillo_manual"), 1.0);
+        assert_eq!(loaded.canal_fijo, FixedChannelMode::Auto);
         assert!(temp_dir.join(CONFIG_FILE_NAME).exists());
 
         // Modificar y guardar
         let mut modified = loaded;
+        modified.canal_fijo = FixedChannelMode::C;
         modified.set("cielo_brillo_manual", 2.2);
         modified.save(&temp_dir).expect("Debe guardar");
 
         // Cargar nuevamente: debe leer el valor guardado
         let reloaded = VulpeConfig::load_or_create(&temp_dir).expect("Debe cargar");
+        assert_eq!(reloaded.canal_fijo, FixedChannelMode::C);
         assert!((reloaded.get("cielo_brillo_manual") - 2.2).abs() < 1e-4);
 
         let _ = fs::remove_dir_all(&temp_dir);
