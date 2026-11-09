@@ -21,7 +21,10 @@ da al shader algunos datos del mundo; el mod se los pasa por `frame.mods`.
 ## Qué hace hoy
 
 - Pasa al shader el día del mundo, la fase de la luna y la estación del año.
-- Pronto: el último rayo, el estado del jugador y los ajustes finos del shader.
+- Pasa la posición y edad del último rayo relativo a la cámara.
+- Lee los ajustes finos del jugador desde un archivo de configuración (`vulpe-horizon.toml`).
+- Pasa hasta 16 ajustes finos en vivo al shader sin recargar.
+- Escribe el archivo de constantes del pack para el ajuste fino fijo.
 
 ## Puesta en marcha
 
