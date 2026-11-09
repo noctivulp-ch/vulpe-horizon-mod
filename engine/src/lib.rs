@@ -2,6 +2,12 @@
 //!
 //! Implementa la especificación de `frame.mods` v1 descrita en `vulpe-horizon-spec/flexibilidad/mod-nativo.md`.
 
+pub mod config;
+pub mod table;
+
+pub use config::VulpeConfig;
+pub use table::{ParamDef, PARAM_TABLE, find_param_by_id, find_param_by_name};
+
 use std::sync::Mutex;
 use std::time::Instant;
 
