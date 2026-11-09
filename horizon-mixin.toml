@@ -1,0 +1,25 @@
+# Manifiesto de mixin de Horizon para Vulpe (docs/native-mods.md)
+[mod]
+id = "vulpe"
+version = "0.1.0"
+
+[compatibility]
+horizon_revision = "fdc87aecdbd116bf1e08adcd062fcbaea8c2e2ca"
+
+# Gancho nativo para rellenar frame.mods en cada fotograma
+[[injection]]
+id = "shader_params"
+hook = "shader_params"
+hook_version = 1
+kind = "HEAD"
+helper = "shader_params.rs"
+bindings = [
+    { name = "game", ty = "&crate::game::Game<'_>", value = "self" },
+    { name = "partial", ty = "f32", value = "partial" },
+    { name = "params", ty = "&mut [[f32; 4]; 8]", value = "params" },
+]
+
+# Crate propio del mod: lógica central y motor de cálculo de parámetros
+[[crate]]
+id = "engine"
+path = "engine"
