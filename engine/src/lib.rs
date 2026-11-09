@@ -3,9 +3,14 @@
 //! Implementa la especificación de `frame.mods` v1 descrita en `vulpe-horizon-spec/flexibilidad/mod-nativo.md`.
 
 pub mod config;
+pub mod constants;
 pub mod table;
 
 pub use config::VulpeConfig;
+pub use constants::{
+    CONSTANTS_WGSL_FILENAME, PackWriteResult, generate_constants_wgsl, generate_full_constants_wgsl,
+    write_pack_constants,
+};
 pub use table::{ParamDef, PARAM_TABLE, find_param_by_id, find_param_by_name};
 
 use std::sync::Mutex;
@@ -59,6 +64,19 @@ pub struct LiveAdjustment {
 
 static LAST_LIGHTNING: Mutex<Option<LightningRecord>> = Mutex::new(None);
 static LIVE_ADJUSTMENTS: Mutex<Vec<LiveAdjustment>> = Mutex::new(Vec::new());
+static FIXED_CHANNEL_ACTIVE: Mutex<bool> = Mutex::new(false);
+
+/// Activa o desactiva la bandera del canal fijo (archivo de constantes WGSL del pack).
+pub fn set_fixed_channel_active(active: bool) {
+    if let Ok(mut lock) = FIXED_CHANNEL_ACTIVE.lock() {
+        *lock = active;
+    }
+}
+
+/// Indica si el canal fijo está activo en la cabecera del formato.
+pub fn is_fixed_channel_active() -> bool {
+    FIXED_CHANNEL_ACTIVE.lock().map(|lock| *lock).unwrap_or(false)
+}
 
 /// Establece un ajuste en vivo por su ID numérico. Si ya existe, actualiza su valor.
 pub fn set_live_adjustment(id: u32, value: f32) -> bool {
@@ -234,10 +252,13 @@ pub fn populate_shader_params_live(
         }
     }
 
-    // Banderas válidas: tiempo (bit 0) y estación (bit 2), y rayo (bit 1) si está activo
+    // Banderas válidas: tiempo (bit 0), estación (bit 2), rayo (bit 1) y canal fijo (bit 4)
     let mut flags_u32 = FLAG_TIME_VALID | FLAG_SEASON_VALID;
     if lightning_valid {
         flags_u32 |= FLAG_LIGHTNING_VALID;
+    }
+    if is_fixed_channel_active() {
+        flags_u32 |= FLAG_FIXED_CHANNEL_ACTIVE;
     }
     let flags = flags_u32 as f32;
 
@@ -487,5 +508,22 @@ mod tests {
         let back_to_u32 = as_f32 as u32;
         assert_eq!(max_code, back_to_u32);
         assert_eq!(back_to_u32, 16_777_215);
+    }
+
+    #[test]
+    fn test_fixed_channel_flag_in_shader_params() {
+        set_fixed_channel_active(false);
+        let mut params = [[0.0; 4]; 8];
+        populate_shader_params(Some(0), 0.0, &mut params);
+        // Sin canal fijo: banderas = 5.0 (tiempo 1 + estación 4)
+        assert_eq!(params[0][2], 5.0);
+
+        set_fixed_channel_active(true);
+        populate_shader_params(Some(0), 0.0, &mut params);
+        // Con canal fijo: banderas = 21.0 (tiempo 1 + estación 4 + canal fijo 16)
+        assert_eq!(params[0][2], 21.0);
+        assert_eq!((params[0][2] as u32) & FLAG_FIXED_CHANNEL_ACTIVE, 16);
+
+        set_fixed_channel_active(false);
     }
 }
