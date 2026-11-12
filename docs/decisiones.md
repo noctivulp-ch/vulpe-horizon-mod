@@ -105,3 +105,25 @@ Por decisión del gestor, **se elimina la Forma B** (su opción y su código) y 
   1. En la copia `shaderpacks/vulpe-mod/horizon-shaders.toml`, el mod asigna `id = "vulpe_mod"` para evitar colisiones con el pack original (`id = "vulpe"`).
   2. Actualiza `game.settings.horizon.shader_pack = "horizon:vulpe_mod"`, persiste la elección con `game.settings.save(&Game::options_path())` y llama a `game.native_shaders.select(...)` apuntando a `shaderpacks/vulpe-mod`.
   3. Si el jugador cambia `canal_fijo = "apagado"` (o ejecuta `/vulpe modo apagado`), el canal fijo se desactiva (`mods[0].z = 5.0`) y, si estaba en `vulpe-mod`, vuelve a seleccionar el pack original `horizon:vulpe`.
+
+## 6. Formato 2 de `frame.mods` (B-21, 2026-11-12)
+
+Especificación: `vulpe-horizon-spec/flexibilidad/mod-nativo.md` §5, «Formato 2».
+
+- **Cabecera 1002.** `mods[1].w` lleva la categoría del bioma en la cámara (parte entera: 0 desconocido, 1 pantano,
+  2 jungla, 3 jardín pálido) y su peso (parte decimal, 0–0,99). El peso sube y baja en `BIOME_FADE_SECONDS` = 4 s; al
+  cambiar de categoría primero baja la anterior hasta 0 y entonces cambia.
+- **Bandera del bioma en el bit 5**, no en el 4 como dice la especificación: el bit 4 ya era «canal fijo en uso» en
+  el formato 1 y el pack lo sigue leyendo. Pregunta abierta a A (`vulpe-horizon/docs/preguntas-para-A.md`, 16).
+- **Lectura**: `game.native_biome([x, y, z]) -> Option<String>` en la posición de la cámara, dentro del gancho
+  `shader_params`; nombre a categoría con `biome_category` (`swamp`, `mangrove_swamp`; `jungle`, `sparse_jungle`,
+  `bamboo_jungle`; `pale_garden`).
+- **No hecho, y por qué** (lo que la API nativa deja leer en el cliente, según `docs/horizon/.../native-mods.md`):
+  - *Vida*: solo llega dentro del gancho del HUD (`native_health_hud`, API 27, con `HealthInputs`), que obliga a
+    dibujar las filas de corazones; no hay un lector de la vida del jugador local fuera de él. `mods[3]` sigue a 0 con
+    su bandera apagada. Para el daño (clase y edad) haría falta además seguir la vida en el tiempo.
+  - *En llamas*: no hay lectura de cliente documentada (las del jugador son de servidor: `native_acting_player`).
+  - *Altura de entrada al agua* (`mods[3].w` negativo): el pack ya la guarda en su propio estado (F-21), no hace falta.
+  Lo que falta se pide a Horizon (el gestor lo lleva a `PR-Pending/`).
+- `engine/Cargo.lock` no puede existir al compilar con el lanzador («a bundle crate cannot ship a Cargo.lock»): las
+  pruebas con `cargo test` lo crean; hay que borrarlo antes de `native-build`.

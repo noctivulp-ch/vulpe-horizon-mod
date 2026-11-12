@@ -8,6 +8,11 @@ fn vulpe_shader_params(
         .native_camera()
         .map(|cam| cam.position)
         .or_else(|| day_time.map(|_| game.view.position));
+    // Formato 2: el bioma en la cámara (subsistema 21, niebla local).
+    let biome = camera_pos.and_then(|c| {
+        game.native_biome([c[0].floor() as i32, c[1].floor() as i32, c[2].floor() as i32])
+    });
+    vulpe_engine::observe_camera_biome(biome.as_deref());
     if let Some(bolt) = game.bolts.last() {
         vulpe_engine::observe_client_bolt(bolt.id, bolt.at);
     }

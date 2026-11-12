@@ -22,8 +22,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Firma base de la cabecera del formato: 1000 + versión_formato.
-pub const FORMAT_VERSION: f32 = 1.0;
-pub const FORMAT_HEADER_SIG: f32 = 1000.0 + FORMAT_VERSION; // 1001.0
+pub const FORMAT_VERSION: f32 = 2.0;
+pub const FORMAT_HEADER_SIG: f32 = 1000.0 + FORMAT_VERSION; // 1002.0 (formato 2: bioma en mods[1].w)
 
 /// Versión actual de la tabla unificada de parámetros.
 pub const PARAM_TABLE_VERSION: f32 = 1.0;
@@ -34,6 +34,12 @@ pub const FLAG_LIGHTNING_VALID: u32 = 1 << 1; // Bit 1 (2): rayo válido
 pub const FLAG_SEASON_VALID: u32 = 1 << 2; // Bit 2 (4): estación válida
 pub const FLAG_PLAYER_VALID: u32 = 1 << 3; // Bit 3 (8): estado del jugador válido
 pub const FLAG_FIXED_CHANNEL_ACTIVE: u32 = 1 << 4; // Bit 4 (16): canal fijo en uso
+/// Formato 2: bioma de la cámara válido en `mods[1].w`. La especificación lo pone en el bit 4, que ya era el canal fijo
+/// en el formato 1: va en el 5 (docs/decisiones.md, pregunta abierta a A).
+pub const FLAG_BIOME_VALID: u32 = 1 << 5; // Bit 5 (32)
+
+/// Segundos que tarda el peso del bioma en subir de 0 a 1 o en bajar de 1 a 0 al cruzar una frontera.
+pub const BIOME_FADE_SECONDS: f32 = 4.0;
 
 /// Duración por defecto de cada estación en días del juego (24 días).
 pub const DEFAULT_SEASON_DAYS: f64 = 24.0;
@@ -68,6 +74,62 @@ pub struct LiveAdjustment {
 }
 
 static LAST_LIGHTNING: Mutex<Option<LightningRecord>> = Mutex::new(None);
+static CAMERA_BIOME: Mutex<Option<BiomeFade>> = Mutex::new(None);
+
+/// Categoría del bioma de la cámara con su peso suavizado en el tiempo (formato 2, `mods[1].w`).
+#[derive(Clone, Copy, Debug)]
+struct BiomeFade {
+    category: u32, // 0 desconocido, 1 pantano, 2 jungla, 3 jardín pálido
+    weight: f32,   // 0..1
+    last: Instant,
+}
+
+/// Categoría de niebla local (subsistema 21) de un bioma por su nombre (`minecraft:swamp`): 1 pantano, 2 jungla,
+/// 3 jardín pálido, 0 los demás.
+pub fn biome_category(name: &str) -> u32 {
+    let n = name.rsplit(':').next().unwrap_or(name);
+    match n {
+        "swamp" | "mangrove_swamp" => 1,
+        "jungle" | "sparse_jungle" | "bamboo_jungle" => 2,
+        "pale_garden" => 3,
+        _ => 0,
+    }
+}
+
+/// Registra el bioma en la cámara de este fotograma (None si no se sabe) y suaviza su peso.
+pub fn observe_camera_biome(name: Option<&str>) {
+    observe_camera_biome_at(name, Instant::now());
+}
+
+pub fn observe_camera_biome_at(name: Option<&str>, now: Instant) {
+    let Ok(mut lock) = CAMERA_BIOME.lock() else { return };
+    let Some(name) = name else {
+        *lock = None;
+        return;
+    };
+    let target = biome_category(name);
+    let mut st = lock.unwrap_or(BiomeFade { category: target, weight: 0.0, last: now });
+    let dt = now.saturating_duration_since(st.last).as_secs_f32().min(1.0);
+    let step = dt / BIOME_FADE_SECONDS;
+    if st.category == target {
+        st.weight = (st.weight + step).min(1.0);
+    } else {
+        // Primero se apaga la categoría anterior; al llegar a 0 se cambia a la nueva.
+        st.weight -= step;
+        if st.weight <= 0.0 {
+            st.category = target;
+            st.weight = 0.0;
+        }
+    }
+    st.last = now;
+    *lock = Some(st);
+}
+
+/// `categoría + peso` (peso 0..0,99) para `mods[1].w`, o None si no hay bioma observado.
+pub fn camera_biome_param() -> Option<f32> {
+    let st = (*CAMERA_BIOME.lock().ok()?)?;
+    Some(st.category as f32 + st.weight.min(0.99))
+}
 static LAST_CLIENT_BOLT_ID: Mutex<Option<u32>> = Mutex::new(None);
 static LIVE_ADJUSTMENTS: Mutex<Vec<LiveAdjustment>> = Mutex::new(Vec::new());
 static FIXED_CHANNEL_ACTIVE: Mutex<bool> = Mutex::new(false);
@@ -648,7 +710,7 @@ pub fn populate_shader_params_live(
         Some(t) => t,
         None => {
             // Sin reloj disponible (pantalla de título o mundo no cargado)
-            // mods[0]: firma 1001.0, tabla 1.0, banderas 0.0, ajustes en vivo según live_count
+            // mods[0]: firma 1002.0, tabla 1.0, banderas 0.0, ajustes en vivo según live_count
             params[0] = [FORMAT_HEADER_SIG, PARAM_TABLE_VERSION, 0.0, live_count as f32];
             return;
         }
@@ -697,13 +759,17 @@ pub fn populate_shader_params_live(
     if is_fixed_channel_active() {
         flags_u32 |= FLAG_FIXED_CHANNEL_ACTIVE;
     }
+    let biome = camera_biome_param();
+    if biome.is_some() {
+        flags_u32 |= FLAG_BIOME_VALID;
+    }
     let flags = flags_u32 as f32;
 
     // mods[0] cabecera: [firma, versión_tabla, banderas, cantidad_ajustes_en_vivo]
     params[0] = [FORMAT_HEADER_SIG, PARAM_TABLE_VERSION, flags, live_count as f32];
 
-    // mods[1] tiempo
-    params[1] = [day_mod, moon_phase, continuous_season, 0.0];
+    // mods[1] tiempo y, en el formato 2, el bioma de la cámara con su peso
+    params[1] = [day_mod, moon_phase, continuous_season, biome.unwrap_or(0.0)];
 }
 
 #[cfg(test)]
@@ -713,6 +779,32 @@ mod tests {
     static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn test_biome_category_and_fade() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(biome_category("minecraft:swamp"), 1);
+        assert_eq!(biome_category("minecraft:bamboo_jungle"), 2);
+        assert_eq!(biome_category("minecraft:pale_garden"), 3);
+        assert_eq!(biome_category("minecraft:plains"), 0);
+        let t0 = Instant::now();
+        observe_camera_biome_at(Some("minecraft:swamp"), t0);
+        observe_camera_biome_at(Some("minecraft:swamp"), t0 + std::time::Duration::from_secs_f32(0.9));
+        observe_camera_biome_at(Some("minecraft:swamp"), t0 + std::time::Duration::from_secs_f32(1.8));
+        let v = camera_biome_param().unwrap();
+        assert!((v - 1.45).abs() < 0.02, "pantano a 1,8 s: {v}");
+        // Al salir a llanura, el peso baja antes de cambiar de categoría.
+        observe_camera_biome_at(Some("minecraft:plains"), t0 + std::time::Duration::from_secs_f32(2.6));
+        let v = camera_biome_param().unwrap();
+        assert!(v > 1.0 && v < 1.45, "bajando: {v}");
+        let mut params = [[0.0; 4]; 8];
+        populate_shader_params(Some(0), 0.0, &mut params);
+        assert_eq!(params[0][2] as u32 & FLAG_BIOME_VALID, FLAG_BIOME_VALID);
+        observe_camera_biome(None);
+        populate_shader_params(Some(0), 0.0, &mut params);
+        assert_eq!(params[0][2] as u32 & FLAG_BIOME_VALID, 0);
+        assert_eq!(params[1][3], 0.0);
+    }
+
+    #[test]
     fn test_no_clock_gives_zero_flags() {
         let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         clear_live_adjustments();
@@ -720,7 +812,7 @@ mod tests {
         let mut params = [[0.0; 4]; 8];
         populate_shader_params(None, 0.0, &mut params);
 
-        assert_eq!(params[0], [1001.0, 1.0, 0.0, 0.0]);
+        assert_eq!(params[0], [1002.0, 1.0, 0.0, 0.0]);
         assert_eq!(params[1], [0.0, 0.0, 0.0, 0.0]);
         assert_eq!(params[2], [0.0, 0.0, 0.0, -1.0]);
         assert_eq!(params[3], [0.0, 0.0, 0.0, 0.0]);
@@ -737,8 +829,8 @@ mod tests {
         let mut params = [[0.0; 4]; 8];
         populate_shader_params(Some(0), 0.0, &mut params);
 
-        // Cabecera: versión 1001, tabla 1, banderas 5 (tiempo + estación), 0 ajustes en vivo
-        assert_eq!(params[0], [1001.0, 1.0, 5.0, 0.0]);
+        // Cabecera: versión 1002, tabla 1, banderas 5 (tiempo + estación), 0 ajustes en vivo
+        assert_eq!(params[0], [1002.0, 1.0, 5.0, 0.0]);
         // Tiempo: día 0, fase 0 (luna llena), estación 0.0 (inicio primavera), reservado 0.0
         assert_eq!(params[1], [0.0, 0.0, 0.0, 0.0]);
         // Rayo inactivo: edad negativa
@@ -754,7 +846,7 @@ mod tests {
         // Día 1 al mediodía (24000 + 6000 = 30000 ticks)
         populate_shader_params(Some(30_000), 0.0, &mut params);
 
-        assert_eq!(params[0][0], 1001.0);
+        assert_eq!(params[0][0], 1002.0);
         assert_eq!(params[0][2], 5.0);
         assert_eq!(params[1][0], 1.0); // Día 1
         assert_eq!(params[1][1], 1.0); // Fase luna 1
@@ -820,7 +912,7 @@ mod tests {
         let mut params = [[0.0; 4]; 8];
         // /time set puede provocar ticks negativos
         populate_shader_params(Some(-24_000), 0.0, &mut params);
-        assert_eq!(params[0][0], 1001.0);
+        assert_eq!(params[0][0], 1002.0);
         assert!(params[1][0] >= 0.0);
         assert!(params[1][1] >= 0.0 && params[1][1] <= 7.0);
         assert!(params[1][2] >= 0.0 && params[1][2] < 4.0);

@@ -41,10 +41,10 @@ fn test_end_to_end_flow() {
     populate_shader_params_full(Some(24000), 0.0, camera_pos, &mut params);
 
     // Cabecera:
-    // firma = 1001.0, tabla = 1.0
+    // firma = 1002.0, tabla = 1.0
     // banderas = 1 (tiempo) | 2 (rayo) | 4 (estación) | 16 (canal fijo) = 23.0
     // cantidad ajustes en vivo = 1.0
-    assert_eq!(params[0][0], 1001.0);
+    assert_eq!(params[0][0], 1002.0);
     assert_eq!(params[0][1], 1.0);
     assert_eq!(params[0][2], 23.0);
     assert_eq!(params[0][3], 1.0);
