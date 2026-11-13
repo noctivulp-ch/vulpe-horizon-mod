@@ -2,7 +2,8 @@
 # Empaqueta el mod como .hnmod (el formato de los mods nativos instalados en una instancia).
 # Uso: tools/empaquetar-hnmod.sh [--instalar [CARPETA_DE_LA_INSTANCIA]]
 #   Sin opciones deja dist/vulpe.hnmod. Con --instalar lo copia también a
-#   <instancia>/horizon-native-mods/ (por defecto ~/.local/share/horizon) y lo activa en horizon-mods.txt.
+#   <instancia>/horizon-native-mods/ (por defecto ~/.local/share/horizon), copia la parte de contenido a
+#   horizon-mods/vulpe_clima/ y activa los dos en horizon-mods.txt.
 # Después hay que recompilar la instancia: horizon-launcher native-build --trust-native-code
 # Detalle: docs/guia.md §«Instalarlo en la instancia».
 set -euo pipefail
@@ -44,5 +45,14 @@ if [[ "${1:-}" == --instalar ]]; then
     touch "$lista"
     grep -q '^mod\.vulpe:' "$lista" || echo 'mod.vulpe:true' >>"$lista"
     sed -i 's/^mod\.vulpe:.*/mod.vulpe:true/' "$lista"
-    echo "Instalado en $instancia/horizon-native-mods/vulpe.hnmod (activado en horizon-mods.txt)"
+    # Parte de contenido (texturas y sprites de las partículas): mod aparte en horizon-mods/vulpe_clima/.
+    # Porqué: docs/decisiones.md §7.
+    if [[ -d "$raiz/contenido" ]]; then
+        rm -rf "$instancia/horizon-mods/vulpe_clima"
+        mkdir -p "$instancia/horizon-mods"
+        cp -r "$raiz/contenido" "$instancia/horizon-mods/vulpe_clima"
+        grep -q '^mod\.vulpe_clima:' "$lista" || echo 'mod.vulpe_clima:true' >>"$lista"
+        sed -i 's/^mod\.vulpe_clima:.*/mod.vulpe_clima:true/' "$lista"
+    fi
+    echo "Instalado en $instancia/horizon-native-mods/vulpe.hnmod y horizon-mods/vulpe_clima/ (activados en horizon-mods.txt)"
 fi
