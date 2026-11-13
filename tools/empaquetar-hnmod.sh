@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Empaqueta el mod como .hnmod (el formato de los mods nativos instalados en una instancia).
 # Uso: tools/empaquetar-hnmod.sh [--instalar [CARPETA_DE_LA_INSTANCIA]]
-#   Sin opciones deja dist/vulpe.hnmod. Con --instalar lo copia también a
+#   Sin opciones deja dist/vulpe.hnmod y dist/vulpe_clima.hmod (la parte de contenido, para el registro). Con --instalar lo copia también a
 #   <instancia>/horizon-native-mods/ (por defecto ~/.local/share/horizon), copia la parte de contenido a
 #   horizon-mods/vulpe_clima/ y activa los dos en horizon-mods.txt.
 # Después hay que recompilar la instancia: horizon-launcher native-build --trust-native-code
@@ -36,6 +36,21 @@ with zipfile.ZipFile(salida, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr(zipfile.ZipInfo(f"mixins/{mod['id']}/{f}", fecha), open(f"{raiz}/{f}", "rb").read())
 print(f"{salida}: {len(dentro)} archivos")
 PY
+
+# Parte de contenido como .hmod (texturas y sprites de las partículas), para el registro de Horizon:
+# un .hnmod no puede llevar assets/. Porqué: docs/decisiones.md §7.
+if [[ -d "$raiz/contenido" ]]; then
+    python3 -I - "$raiz" <<'PY'
+import subprocess, sys, zipfile
+raiz = sys.argv[1]
+archivos = subprocess.run(["git", "-C", raiz, "ls-files", "contenido"], capture_output=True, text=True, check=True).stdout.split()
+salida = f"{raiz}/dist/vulpe_clima.hmod"
+with zipfile.ZipFile(salida, "w", zipfile.ZIP_DEFLATED) as z:
+    for f in sorted(archivos):
+        z.writestr(zipfile.ZipInfo(f[len("contenido/"):], (2026, 1, 1, 0, 0, 0)), open(f"{raiz}/{f}", "rb").read())
+print(f"{salida}: {len(archivos)} archivos")
+PY
+fi
 
 if [[ "${1:-}" == --instalar ]]; then
     instancia="${2:-$HOME/.local/share/horizon}"
