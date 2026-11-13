@@ -189,6 +189,8 @@ impl VulpeConfig {
             out.push('\n');
         }
 
+        // La sección [clima] del clima con partículas (se guarda con los valores que estén cargados).
+        out.push_str(&crate::clima::config().to_toml_section());
         out
     }
 

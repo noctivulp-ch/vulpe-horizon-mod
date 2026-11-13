@@ -2,6 +2,7 @@
 //!
 //! Implementa la especificación de `frame.mods` v1 descrita en `vulpe-horizon-spec/flexibilidad/mod-nativo.md`.
 
+pub mod clima;
 pub mod config;
 pub mod constants;
 pub mod table;
@@ -37,6 +38,9 @@ pub const FLAG_FIXED_CHANNEL_ACTIVE: u32 = 1 << 4; // Bit 4 (16): canal fijo en 
 /// Formato 2: bioma de la cámara válido en `mods[1].w`. La especificación lo pone en el bit 4, que ya era el canal fijo
 /// en el formato 1: va en el 5 (docs/decisiones.md, pregunta abierta a A).
 pub const FLAG_BIOME_VALID: u32 = 1 << 5; // Bit 5 (32)
+/// Lluvia y nieve como partículas del mod encendidas: el pack no dibuja las suyas (subsistemas/26). El bit 6 queda para
+/// la altura de entrada al agua del formato 2.
+pub const FLAG_PARTICLE_WEATHER: u32 = 1 << 7; // Bit 7 (128)
 
 /// Segundos que tarda el peso del bioma en subir de 0 a 1 o en bajar de 1 a 0 al cruzar una frontera.
 pub const BIOME_FADE_SECONDS: f32 = 4.0;
@@ -403,6 +407,16 @@ pub fn sync_runtime_state(
         return;
     };
 
+    // Sección [clima] (clima con partículas, port de Particle Rain): se lee del mismo archivo; si falta, se añade con
+    // los valores por defecto para que el jugador la vea.
+    let cfg_file = cfg_dir.join(config::CONFIG_FILE_NAME);
+    if let Ok(texto) = std::fs::read_to_string(&cfg_file) {
+        clima::set_config(clima::ClimaConfig::from_toml_str(&texto));
+        if !texto.lines().any(|l| l.trim() == "[clima]") {
+            let _ = std::fs::write(&cfg_file, format!("{}{}", texto, clima::config().to_toml_section()));
+        }
+    }
+
     let modified = modified_params_from_config(&cfg);
 
     // Actualizar los ajustes en vivo cuando hay parámetros modificados en el TOML,
@@ -762,6 +776,9 @@ pub fn populate_shader_params_live(
     let biome = camera_biome_param();
     if biome.is_some() {
         flags_u32 |= FLAG_BIOME_VALID;
+    }
+    if clima::particulas_activas() {
+        flags_u32 |= FLAG_PARTICLE_WEATHER;
     }
     let flags = flags_u32 as f32;
 

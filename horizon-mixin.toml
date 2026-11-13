@@ -65,6 +65,18 @@ bindings = [
     { name = "game", ty = "&mut crate::game::Game<'_>", value = "self" },
 ]
 
+# Gancho por tick (en todos los Game: el helper solo actúa en el de la ventana): clima con partículas (port de
+# Particle Rain; etapa 1, lluvia y nieve). En esta versión de Horizon no hay client_tick_post en el catálogo.
+[[injection]]
+id = "client_tick"
+hook = "tick"
+hook_version = 1
+kind = "HEAD"
+helper = "client_tick.rs"
+bindings = [
+    { name = "game", ty = "&mut crate::game::Game<'_>", value = "self" },
+]
+
 # Crate propio del mod: lógica central y motor de cálculo de parámetros
 [[crate]]
 id = "engine"

@@ -16,3 +16,40 @@ Componentes de terceros
 
 - Sin dependencias externas en el crate `vulpe-engine`.
 - Horizon (MIT) no se incluye: el mod se compila contra él con `horizon-launcher native-build`.
+
+Particle Rain
+-------------
+
+Los efectos de clima con partículas (`engine/src/clima.rs`, `client_tick.rs`; lluvia y nieve en esta etapa) son un
+port a Horizon de Particle Rain, de pigcart: https://github.com/PigCart/particle-rain (rama `main`, commit
+`75443ca`). Se portaron la lógica de nacimiento alrededor de la cámara (`ParticleSpawner`), el viento
+(`ParticleRain.getWind`, `WindManager`), el movimiento, el choque y el desvanecido (`CustomParticle`,
+`WeatherParticle`) y los valores de `particles.json` y `config/ConfigData.java`. El dueño lo conoció como Pretty Rain
+(Leclowndu93150 y PigCart), la versión para Forge de Particle Rain.
+
+No se reutilizan texturas ni sonidos de Particle Rain ni de Minecraft: las de `contenido/assets/vulpe/textures/particle/`
+(`lluvia_0..15`, `lluvia_fuerte_0..3`, `nieve_0..15`, `nieve_fuerte_0..3`) las dibuja `tools/generar-texturas-clima.py`.
+
+Licencia de Particle Rain (MIT), tal cual:
+
+The MIT License (MIT)
+
+Copyright (c) 2025
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.

@@ -1,0 +1,11 @@
+# Parte de contenido del mod nativo de Vulpe: las texturas y los juegos de sprites de las partículas del clima (port
+# de Particle Rain, ver NOTICE). Se instala en horizon-mods/vulpe_clima/ y se activa con mod.vulpe_clima:true
+id = "vulpe_clima"
+name = "Vulpe para Horizon (contenido)"
+version = "0.2.0"
+description = "Texturas y sprites de la lluvia y la nieve como partículas"
+authors = ["noctivulp-ch"]
+api = "0.2"
+side = "client"
+capabilities = ["registries"]
+namespaces = ["vulpe"]

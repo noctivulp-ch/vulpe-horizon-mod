@@ -55,3 +55,7 @@ publicadas como software libre. Las compilaciones oficiales y las novedades sale
 ---
 
 <p align="center"><sub>© 2026 NoctiVulp · <b>Powered by AI</b> — desarrollado con la asistencia de Claude, de Anthropic.</sub></p>
+
+## Créditos
+
+Los efectos de clima con partículas son un port de Particle Rain (pigcart, MIT). Ver [`NOTICE`](NOTICE).

@@ -127,3 +127,53 @@ Especificación: `vulpe-horizon-spec/flexibilidad/mod-nativo.md` §5, «Formato 
   Lo que falta se pide a Horizon (el gestor lo lleva a `PR-Pending/`).
 - `engine/Cargo.lock` no puede existir al compilar con el lanzador («a bundle crate cannot ship a Cargo.lock»): las
   pruebas con `cargo test` lo crean; hay que borrarlo antes de `native-build`.
+
+## 7. Clima con partículas: port de Particle Rain, etapa 1 (B-22, 2026-11-13)
+
+Especificación: `vulpe-horizon-spec/subsistemas/26-clima-de-particle-rain.md` (excepción a la sala limpia solo para
+`../particle-rain/`, MIT). Decisión del dueño: la lluvia y la nieve pasan a partículas del mod, encendidas por defecto,
+y sustituyen a las del pack. El gestor pidió hacerlo por etapas: esta es la 1 (lluvia, nieve, viento y la bandera).
+
+- **Dónde:** la lógica pura en `engine/src/clima.rs` (con pruebas: viento, densidad, nacimiento, movimiento, opacidad,
+  configuración); lo que lee el mundo y crea las partículas en `client_tick.rs`, inyectado en `client_tick_post`.
+- **Partículas:** controladores compilados de Horizon (`ParticleEngine::controlled`, `ParticleController`): Horizon no
+  les aplica movimiento; el controlador las mueve como `Particle.tick` de vanilla (gravedad a 0,04 por tick, freno del
+  2 %) más el viento de `WindManager` cada tick, y las quita al salir del radio o al entrar en un bloque sólido o un
+  líquido. Opacidad por distancia (`FadeType.DISTANCE`) × fuerza de la lluvia del momento: suben y bajan con ella.
+- **Nacimiento** (`ParticleSpawner.tickSkyFX`): en una esfera de 16 bloques alrededor de la cámara, más arriba que
+  abajo si está parada; tope/25 intentos por tick (60), ×1,5 con tormenta, ×(1 + 2·velocidad); 4 si lleva 100 ticks sin
+  crear ninguna. Solo donde llega el cielo (por encima de la altura MOTION_BLOCKING, `render_tick::motion_blocking_height`)
+  y con la precipitación del bioma en ese punto (`snows_at`): lluvia o nieve. Las «fuertes», solo con tormenta.
+- **Tope:** si el motor de partículas ya tiene `tope` (1500) vivas, no nace ninguna.
+- **Texturas:** propias (`tools/generar-texturas-clima.py`): Particle Rain recorta las hojas de vanilla, que no se pueden
+  repartir. Van en la parte de contenido, `contenido/`: un mod de contenido `vulpe_clima` que se copia a
+  `horizon-mods/vulpe_clima/` de la instancia y se activa con `mod.vulpe_clima:true` en `horizon-mods.txt`. Su
+  manifiesto necesita, o el juego no lo carga: `capabilities = ["registries"]` (sin ella, `game/mods.rs` lo salta en
+  silencio) y `namespaces = ["vulpe"]` (un mod solo añade archivos en sus espacios de nombres: su id y los que liste;
+  el aviso sale en `logs/latest.log`). El motor de partículas lee los juegos de sprites de la raíz de recursos, a la
+  que se superponen los mods de contenido (`mod_content.rs`): ahí aparecen `vulpe:lluvia`, etc.
+- **Bandera:** `FLAG_PARTICLE_WEATHER`, bit 7 de la cabecera de `frame.mods` (el 6 queda para la altura de entrada al
+  agua). Encendida si la lluvia **y** la nieve de partículas están encendidas: entonces el pack no dibuja las suyas. Con
+  una de las dos apagada, el mod no dibuja ninguna y el pack dibuja las dos, para que no se mezclen.
+- **Ajustes:** sección `[clima]` de `config/vulpe-horizon.toml` (se añade sola si falta): `lluvia`, `nieve`,
+  `densidad`, `tope`, `densidad_tormenta`, `distancia` y los cuatro del viento. Fuera de la tabla de parámetros, para no
+  cambiar su versión (la lee el pack). No se cambian aún por `/vulpe`.
+- **Límites de esta etapa:** la partícula de Horizon solo mira a la cámara: la lluvia no se inclina según la velocidad
+  (`RELATIVE_VELOCITY`) ni la nieve gira (`rotationAmount`); el tinte del agua es el color por defecto de vanilla, no el
+  del bioma; sin sonidos ni animación de choque. Quedan para la etapa 2 los demás efectos (polvo, matorrales,
+  salpicaduras, ondas, humo, regueros, nieblas) y los sonidos.
+- **Gancho:** `tick` (en esta versión de Horizon no hay `client_tick_post` en `native-hooks.json`); corre en todos los
+  `Game`, así que el helper sale si no es la ventana (`native_window()`). Un helper tiene que ser **una sola función
+  privada**: el `struct` y el `impl ParticleController` van declarados dentro de su cuerpo. La cámara: la de
+  `native_camera()` o, si no la da, `game.view.position` (como `shader_params.rs`); sin ese respaldo el helper salía
+  antes de encender la bandera.
+- **Tope:** se cuenta con un contador propio (sube al nacer, baja cuando el controlador quita la partícula, y cada 100
+  ticks se recorta al total del motor, que también las quita por sus límites). Comparar con el total del motor no
+  servía: las partículas de vanilla (unas 1 100 en un bosque con lluvia) ya lo llenaban.
+- **Comprobado** (2026-11-13, instancia `vulpe-pruebas`, versión `native-fdc87ae-4cd701a43bfe`): lluvia y tormenta en
+  llanura y bosque, nieve y ventisca en llanura nevada; la lluvia del pack se apaga con la bandera (comprobado pintando
+  la del pack con el estado de `frame.mods`). En la tormenta, ~1 400 partículas propias.
+- **Coste** (misma escena de tormenta, ventana con tope de 30 fps): CPU 5,80 ms con el mod frente a 5,22 ms con la
+  lluvia del pack (+0,6 ms); GPU 16,54 frente a 16,41 ms. Con el tope, la GPU no es una medida fiable.
+- **Pendiente visto:** las gotas y los copos salen grises, más oscuros que el cielo claro: Horizon aún no tiene etapa
+  de partículas en la API de packs, y el pack no puede iluminarlas. A revisar en la etapa 2.
