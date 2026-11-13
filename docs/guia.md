@@ -71,6 +71,22 @@ Opcionalmente, se puede especificar el perfil de compilación:
 
 ---
 
+### 4. Instalarlo en la instancia
+
+`native-build <carpeta>` compila **solo** los mods de esa carpeta: la versión que resulta deja fuera los demás mods
+nativos de la instancia (por ejemplo, el contador de FPS del registro). Para que el mod conviva con ellos y se quede
+instalado, se empaqueta como `.hnmod` y se deja en la carpeta de mods nativos de la instancia:
+
+```bash
+tools/empaquetar-hnmod.sh --instalar            # dist/vulpe.hnmod → <instancia>/horizon-native-mods/, y mod.vulpe:true
+horizon-launcher native-build --instance horizon --trust-native-code   # sin carpeta: todos los mods activos
+```
+
+El `.hnmod` lleva solo lo que acepta el lanzador: `horizon-native.json` y, bajo `mixins/vulpe/`, los `.rs`, los `.toml`
+y los textos de crate (`README`, `LICENSE`, `NOTICE`). Cualquier otro archivo (los `.md` de `docs/`) hace que lo rechace.
+El script toma de `git ls-files`, así que lo que no esté versionado no entra. Tras cada cambio del mod se repiten los
+dos pasos.
+
 ## Cómo comprobar `frame.mods` en el juego
 
 El gestor puede verificar que el mod está activo e inyectando datos correctamente inspeccionando los componentes de `frame.mods` en el shader o ejecutando `/vulpe estado` en el chat.
