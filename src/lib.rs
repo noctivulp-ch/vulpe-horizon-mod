@@ -5,9 +5,9 @@ pub use vulpe_engine::*;
 use std::path::{Path, PathBuf};
 
 use mod_api::{
-    ClientHost, ClientTickPostEvent, Command, CommandEvent, Flow, Hooks, LightningStrikeEvent,
-    RegisterClientCommandsEvent, RegisterParticleProvidersEvent, RegistrationContext,
-    RenderFramePreEvent, ServerHost, ShaderParamsEvent, Text,
+    ClientHost, ClientTickPostEvent, Command, CommandEvent, Flow, Heightmap, Hooks,
+    LightningStrikeEvent, RegisterClientCommandsEvent, RegisterParticleProvidersEvent,
+    RegistrationContext, RenderFramePreEvent, ServerHost, ShaderParamsEvent, Text,
 };
 
 /// Lee `pickedShaderPack:` de `horizon-graphics.txt` en la carpeta de la instancia.
@@ -33,6 +33,85 @@ fn resolve_active_pack(instance_dir: &Path) -> Option<PathBuf> {
         return Some(direct.to_path_buf());
     }
     vulpe_engine::resolve_shader_pack_in_dir(&shader_packs_dir, &picked)
+}
+
+/// Deduce si el jugador local está ardiendo a partir de los bloques en pies y cabeza, agua y lluvia (N-07).
+fn observe_player_fire(host: &dyn ClientHost) {
+    let Some(level) = host.level(host.dimension()) else {
+        vulpe_engine::jugador::limpiar_fuego();
+        return;
+    };
+    let pos_y_altura = host
+        .local_player()
+        .and_then(|p| {
+            let ent = p.entity();
+            let ojos = ent.eye_position(host)?;
+            let altura = ent.eye_height(host).unwrap_or(1.62);
+            Some((ojos, altura))
+        })
+        .or_else(|| host.camera().map(|c| (c.position, f64::from(c.eye_height))));
+    let Some((ojos, altura_ojos)) = pos_y_altura else {
+        vulpe_engine::jugador::limpiar_fuego();
+        return;
+    };
+
+    let cabeza = [
+        ojos[0].floor() as i32,
+        ojos[1].floor() as i32,
+        ojos[2].floor() as i32,
+    ];
+    let pies = [
+        ojos[0].floor() as i32,
+        (ojos[1] - altura_ojos + 0.1).floor() as i32,
+        ojos[2].floor() as i32,
+    ];
+
+    let bloque_pies = level
+        .block(host, pies)
+        .map(|k| k.id(host))
+        .unwrap_or_default();
+    let bloque_cabeza = level
+        .block(host, cabeza)
+        .map(|k| k.id(host))
+        .unwrap_or_default();
+    let agua_extra = level
+        .block_property(host, pies, "waterlogged")
+        .as_deref()
+        == Some("true")
+        || level
+            .block_property(host, cabeza, "waterlogged")
+            .as_deref()
+            == Some("true");
+
+    let (lluvia, _) = level.weather(host).unwrap_or((0.0, 0.0));
+    let bajo_lluvia = if lluvia > 0.0 {
+        let llueve_en_bioma = level
+            .client_biome(host, cabeza)
+            .and_then(|b| level.biome_properties(host, &b))
+            .is_some_and(|props| {
+                if !props.has_precipitation {
+                    return false;
+                }
+                let temp = if cabeza[1] > 80 {
+                    props.temperature - (cabeza[1] - 80) as f32 * 0.00125
+                } else {
+                    props.temperature
+                };
+                temp >= 0.15
+            });
+        if llueve_en_bioma {
+            host.client_surface_heights(&[(cabeza[0], cabeza[2])], Heightmap::MotionBlocking)
+                .ok()
+                .and_then(|h| h.first().copied().flatten())
+                .is_some_and(|tope_y| tope_y <= cabeza[1] + 1)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    vulpe_engine::jugador::observar_fuego(&bloque_pies, &bloque_cabeza, agua_extra, bajo_lluvia);
 }
 
 #[derive(Default)]
@@ -101,6 +180,7 @@ impl Hooks for VulpeMod {
             level.client_biome(host, [c[0].floor() as i32, c[1].floor() as i32, c[2].floor() as i32])
         });
         vulpe_engine::observe_camera_biome(biome.as_deref());
+        observe_player_fire(host);
         let instance_dir = host.instance_dir();
         let config_dir = instance_dir.join("config");
         let active_pack = resolve_active_pack(&instance_dir);

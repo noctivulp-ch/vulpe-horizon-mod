@@ -302,3 +302,27 @@ Con la actualización a Horizon `nightly-2026-11-18-dd67b76` (`dd67b76ff23e28c6d
   - Coste (20 s en el bosque tras la lluvia, `horizon-ctl bench 20`):
     - Antes (`native-dd67b76-2ae03345fa04`): **49,47 fps**, CPU 4,10 ms (`tick` 0,50 ms), GPU 13,43 ms.
     - Después (`native-dd67b76-9948028bfff2`): **53,54 fps**, CPU 4,04 ms (`tick` 0,46 ms), GPU 12,05 ms (−1,38 ms GPU).
+
+## 11. Estado de fuego del jugador en `mods[3].z` (N-07, 2026-11-19)
+
+- **Qué ofrece la API de Horizon (`dd67b76`, `mod_api` 0.2):** no existe lectura de cliente ni compartida para saber si
+  una entidad o el jugador local está ardiendo ni sus ticks de fuego restantes (solo existen los mutadores de servidor
+  `EntityRef::extinguish_fire` / `clear_fire` y el ajuste de creación en `finalize_spawn`). Sí están disponibles en el
+  cliente `host.local_player()` (`EntityRef::eye_position`, `eye_height`, con respaldo en `host.camera()`),
+  `level.block`, `level.block_property`, `level.weather`, `level.client_biome`, `level.biome_properties` y
+  `host.client_surface_heights(..., Heightmap::MotionBlocking)`.
+- **Deducción en cliente (`src/engine/src/jugador.rs` + `observe_player_fire` en `src/lib.rs`):**
+  - En cada `render_frame_pre` se consultan los bloques de los pies (`eye_y - eye_height + 0,1`) y de la cabeza (`eye_y`).
+  - `minecraft:lava` en pies o cabeza fija el temporizador a `LAVA_DURACION_S` (15 s); `minecraft:fire` o
+    `minecraft:soul_fire` lo sube al menos a `FUEGO_DURACION_S` (8 s, sin acortar un fuego de lava previo).
+  - Fuera de fuego y lava, entrar en agua (`water`, `bubble_column` o propiedad `waterlogged=true`) o estar bajo lluvia
+    directa (lluvia > 0, bioma con precipitación y temperatura ajustada por altura ≥ 0,15, y `MotionBlocking <= cabeza.y + 1`)
+    apaga el temporizador al instante.
+  - En `populate_shader_params_full` se enciende el **bit 3** (`FLAG_PLAYER_VALID = 8`) en `mods[0].z` siempre que haya
+    estado del jugador observado, y se escribe `mods[3].z = 1.0` mientras arde o `0.0` cuando no. Sin mundo cargado se
+    limpia el estado y el bit 3 vuelve a 0.
+- **Verificación:**
+  - `cargo test` en `src/engine`: 47 pruebas unitarias + 2 de integración, todas en verde (fuego 8 s, fuego de almas,
+    lava 15 s, agua, bloques anegados, lluvia, `mods[3].z` y `FLAG_PLAYER_VALID`).
+  - Empaquetado y compilado en `vulpe-pruebas` (`native-dd67b76-9841443bb307`): `/vulpe estado` devuelve
+    `mods[0]=(1002, 1, 13, 0)` con `llamas=no` fuera del fuego y `llamas=sí (8.0s)` de pie en `minecraft:fire`.

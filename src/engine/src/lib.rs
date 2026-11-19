@@ -5,6 +5,7 @@
 pub mod clima;
 pub mod config;
 pub mod constants;
+pub mod jugador;
 pub mod table;
 
 pub use config::{FixedChannelMode, VulpeConfig};
@@ -556,13 +557,24 @@ pub fn execute_client_command(
             if fixed {
                 flags |= FLAG_FIXED_CHANNEL_ACTIVE;
             }
+            let llamas_info = match jugador::segundos_restantes() {
+                Some(s) => {
+                    flags |= FLAG_PLAYER_VALID;
+                    if s > 0.0 {
+                        format!("sí ({s:.1}s)")
+                    } else {
+                        "no".to_string()
+                    }
+                }
+                None => "n/d".to_string(),
+            };
             let modo_cfg = config_dir
                 .and_then(|d| VulpeConfig::load_or_create(d).ok())
                 .map(|c| c.canal_fijo.as_str())
                 .unwrap_or("c");
             Some(format!(
-                "[Vulpe] mods[0]=({:.0}, {:.0}, {:.0}, {:.0}) | canal_fijo={} (modo={}) | en_vivo={}/16 | rayo={}",
-                FORMAT_HEADER_SIG, PARAM_TABLE_VERSION, flags as f32, live_count as f32, fixed, modo_cfg, live_count, lightning_info
+                "[Vulpe] mods[0]=({:.0}, {:.0}, {:.0}, {:.0}) | canal_fijo={} (modo={}) | en_vivo={}/16 | rayo={} | llamas={}",
+                FORMAT_HEADER_SIG, PARAM_TABLE_VERSION, flags as f32, live_count as f32, fixed, modo_cfg, live_count, lightning_info, llamas_info
             ))
         }
         "modo" => {
@@ -794,10 +806,14 @@ pub fn populate_shader_params_live(
         }
     }
 
-    // Banderas válidas: tiempo (bit 0), estación (bit 2), rayo (bit 1) y canal fijo (bit 4)
+    // Banderas válidas: tiempo (bit 0), estación (bit 2), rayo (bit 1), jugador (bit 3), canal fijo (bit 4), bioma (bit 5), clima partículas (bit 7)
     let mut flags_u32 = FLAG_TIME_VALID | FLAG_SEASON_VALID;
     if lightning_valid {
         flags_u32 |= FLAG_LIGHTNING_VALID;
+    }
+    if let Some(ardiendo) = jugador::en_llamas() {
+        flags_u32 |= FLAG_PLAYER_VALID;
+        params[3][2] = if ardiendo { 1.0 } else { 0.0 };
     }
     if is_fixed_channel_active() {
         flags_u32 |= FLAG_FIXED_CHANNEL_ACTIVE;
@@ -1022,11 +1038,40 @@ mod tests {
     #[test]
     fn test_player_state_defaults() {
         let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        jugador::limpiar_fuego();
         let mut params = [[0.0; 4]; 8];
         populate_shader_params(Some(0), 0.0, &mut params);
         // mods[3] debe ser [0,0,0,0] y bit 3 (8) apagado
         assert_eq!(params[3], [0.0, 0.0, 0.0, 0.0]);
         assert_eq!((params[0][2] as u32) & FLAG_PLAYER_VALID, 0);
+    }
+
+    #[test]
+    fn test_player_fire_shader_params() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        jugador::limpiar_fuego();
+        let t0 = Instant::now();
+        jugador::observar_fuego_en("minecraft:fire", "minecraft:air", false, false, t0);
+        let mut params = [[0.0; 4]; 8];
+        populate_shader_params(Some(0), 0.0, &mut params);
+        assert_eq!((params[0][2] as u32) & FLAG_PLAYER_VALID, FLAG_PLAYER_VALID);
+        assert_eq!(params[3][2], 1.0);
+
+        jugador::observar_fuego_en(
+            "minecraft:water",
+            "minecraft:air",
+            false,
+            false,
+            t0 + Duration::from_secs(1),
+        );
+        populate_shader_params(Some(0), 0.0, &mut params);
+        assert_eq!((params[0][2] as u32) & FLAG_PLAYER_VALID, FLAG_PLAYER_VALID);
+        assert_eq!(params[3][2], 0.0);
+
+        jugador::limpiar_fuego();
+        populate_shader_params(Some(0), 0.0, &mut params);
+        assert_eq!((params[0][2] as u32) & FLAG_PLAYER_VALID, 0);
+        assert_eq!(params[3][2], 0.0);
     }
 
     #[test]
