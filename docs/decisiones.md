@@ -177,3 +177,19 @@ y sustituyen a las del pack. El gestor pidió hacerlo por etapas: esta es la 1 (
   lluvia del pack (+0,6 ms); GPU 16,54 frente a 16,41 ms. Con el tope, la GPU no es una medida fiable.
 - **Pendiente visto:** las gotas y los copos salen grises, más oscuros que el cielo claro: Horizon aún no tiene etapa
   de partículas en la API de packs, y el pack no puede iluminarlas. A revisar en la etapa 2.
+
+## 8. Clima con partículas: etapa 2 — polvo, matorrales, lava, paredes y niebla (N-01)
+
+Especificación: `vulpe-horizon-spec/subsistemas/26-clima-de-particle-rain.md` y `observaciones-del-dueno-2026-11-13.md`
+§5.1 («arena en la cara al correr por biomas arenosos»).
+
+- **Límites de la API de partículas de Horizon** (comprobados en `horizon-client-render/src/particles.rs`):
+  1. `ParticleEngine::render` solo dibuja carteles mirando a la cámara (`COPY_CAMERA`); no hay orientación `HORIZONTAL`,
+     `VERTICAL` ni alineada a una cara, ni giro de quad (`roll`).
+  2. `ParticleEngine::controlled` descarta cualquier partícula que nazca a más de 32 bloques de la cámara
+     (`distance > 1024.0`), por lo que el nacimiento en superficie (`surfaceRange`) se acota a 31,5 bloques.
+  3. No existe API cliente para crear entidades `BlockDisplay` falsas (como `BlockDisplayParticle` de Particle Rain).
+- **Agua (`ripple`):** se deja **apagado por defecto** (`ondas = false`) porque requiere orientación `HORIZONTAL` sobre
+  la superficie del agua; dibujado como cartel mirando a la cámara sobresale verticalmente y se recorta contra el agua.
+  Comprobado en el pack (`vulpe-horizon/nucleo/agua/olas.wgsl`): el pack solo dibuja olas oceánicas, no ondas de gotas
+  de lluvia, así que no habría duplicación cuando Horizon añada orientación horizontal.

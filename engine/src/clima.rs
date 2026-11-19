@@ -27,6 +27,8 @@ pub struct ClimaConfig {
     pub salpicadura: bool,
     /// Humo de lluvia sobre lava, magma y bloques calientes (`smoke`).
     pub humo: bool,
+    /// Ondas de gotas en el agua (`ripple`): apagado por defecto (Horizon solo dibuja carteles a cámara, sin orientación horizontal).
+    pub ondas: bool,
     /// Multiplicador de la densidad de todos los efectos.
     pub densidad: f32,
     /// Tope de partículas vivas (`perf.particleAmount`).
@@ -56,6 +58,7 @@ impl Default for ClimaConfig {
             matorral: true,
             salpicadura: true,
             humo: true,
+            ondas: false,
             densidad: 1.0,
             tope: 1500,
             densidad_tormenta: 1.5,
@@ -96,6 +99,7 @@ impl ClimaConfig {
                 "matorral" => c.matorral = b,
                 "salpicadura" => c.salpicadura = b,
                 "humo" => c.humo = b,
+                "ondas" => c.ondas = b,
                 "densidad" => c.densidad = f.unwrap_or(c.densidad).clamp(0.0, 4.0),
                 "tope" => c.tope = f.map(|x| x.clamp(0.0, 20000.0) as u32).unwrap_or(c.tope),
                 "densidad_tormenta" => c.densidad_tormenta = f.unwrap_or(c.densidad_tormenta).clamp(0.0, 4.0),
@@ -117,13 +121,14 @@ impl ClimaConfig {
             "\n[clima]\n# Lluvia y nieve como partículas del mod (sustituyen a las del pack)\nlluvia = {}\nnieve = {}\n\
              # Polvo de arena y matorrales rodantes en desiertos y mesas con lluvia/tormenta\npolvo = {}\npolvo_raso = {}\nbruma_polvo = {}\nmatorral = {}\n\
              # Lava y calor: salpicaduras y humo con lluvia\nsalpicadura = {}\nhumo = {}\n\
+             # Agua: ondas (`ripple`), apagado por defecto (Horizon no tiene partículas horizontales)\nondas = {}\n\
              # Densidad relativa (0 .. 4)\ndensidad = {:.2}\n# Tope de partículas vivas\ntope = {}\n\
              # Densidad con tormenta\ndensidad_tormenta = {:.2}\n# Radio donde nacen, bloques (4 .. 32)\ndistancia = {:.1}\n\
              # Alcance de efectos de superficie, bloques (8 .. 100; Horizon acota a 32)\nalcance_superficie = {:.1}\n\
              # Viento: fuerza, ráfagas, modulación y más viento con la altura\nviento_fuerza = {:.3}\nviento_rafagas = {:.3}\n\
              viento_modulacion = {:.3}\nviento_altura = {}\n",
             self.lluvia, self.nieve, self.polvo, self.polvo_raso, self.bruma_polvo, self.matorral,
-            self.salpicadura, self.humo,
+            self.salpicadura, self.humo, self.ondas,
             self.densidad, self.tope, self.densidad_tormenta, self.distancia, self.alcance_superficie,
             self.viento_fuerza, self.viento_rafagas, self.viento_modulacion, self.viento_altura
         )
