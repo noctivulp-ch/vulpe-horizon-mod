@@ -261,7 +261,14 @@ impl ParticleProvider for VulpeParticulaProvider {
             return;
         }
         if d.escala_distancia > 0.0 {
-            p.size = cl::tamano_por_distancia(tamano_base, dist, d.escala_distancia);
+            p.size = if matches!(
+                efecto,
+                cl::Efecto::NieblaVertical | cl::Efecto::NieblaVerticalDespues
+            ) {
+                cl::tamano_niebla(tamano_base, dist, d.escala_distancia)
+            } else {
+                cl::tamano_por_distancia(tamano_base, dist, d.escala_distancia)
+            };
         }
         let nivel_clima = match efecto {
             cl::Efecto::NieblaVertical | cl::Efecto::NieblaVerticalDespues => 1.0,
@@ -280,7 +287,8 @@ impl ParticleProvider for VulpeParticulaProvider {
             efecto,
             cl::Efecto::NieblaVertical | cl::Efecto::NieblaVerticalDespues
         ) {
-            alfa = alfa.min(cl::atenuacion_vertical(p.position, cam));
+            alfa = alfa.min(cl::atenuacion_vertical(p.position, cam))
+                * cl::atenuacion_cercania_niebla(dist);
         }
         p.rgba[3] = alfa;
 
@@ -632,10 +640,13 @@ pub fn tick_clima(host: &mut dyn ClientHost) {
                         lluvia > 0.0 && sin_precip && cl::es_bloque_arena(&nombre)
                     }
                     cl::Efecto::NieblaVertical => {
-                        cl::es_bioma_niebla_siempre(&bioma) && cl::es_bloque_niebla(&nombre)
+                        dist >= cl::MIN_DISTANCIA_NIEBLA
+                            && cl::es_bioma_niebla_siempre(&bioma)
+                            && cl::es_bloque_niebla(&nombre)
                     }
                     cl::Efecto::NieblaVerticalDespues => {
                         tras_lluvia
+                            && dist >= cl::MIN_DISTANCIA_NIEBLA
                             && !cl::es_bioma_excluido_niebla_despues(&bioma)
                             && cl::es_bloque_niebla(&nombre)
                     }
@@ -666,7 +677,7 @@ pub fn tick_clima(host: &mut dyn ClientHost) {
                 encolar_particula(SpawnInfo {
                     pos,
                     efecto,
-                    tamano_base: cl::tamano_por_distancia(d.tamano, dist, d.escala_distancia),
+                    tamano_base: d.tamano,
                     distancia_max: alcance,
                     vida: d.vida as i32,
                     rgba: [tinte[0], tinte[1], tinte[2], 0.0],

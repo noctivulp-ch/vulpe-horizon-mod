@@ -264,3 +264,41 @@ Con la actualización a Horizon `nightly-2026-11-18-dd67b76` (`dd67b76ff23e28c6d
   - **Aviso sobre el pack de shaders:** Horizon `dd67b76` exige `api = "0.2"` en `horizon-shaders.toml` y rechazó
     `vulpe-horizon/build/vulpe` (`needs shader API 0.1; this Horizon serves 0.2`), por lo que la lectura de `frame.mods`
     dentro del shader queda pendiente de migrar el pack a shader API 0.2.
+
+## 10. Rectángulos blancos de la niebla tras la lluvia (N-06, 2026-11-19)
+
+- **Causa encontrada** (reproducida en `vulpe-pruebas` con `/time set 6000`, `/weather thunder` 20 s → `/weather clear`,
+  comparando con y sin el shader pack):
+  1. **Capa de partículas opaca (escribe `scene_depth`) en `assets/vulpe/particles/niebla.json`:** en Horizon, las
+     partículas de recurso/proveedor que omiten `"horizon:behaviour": { "alpha": [...] }` se clasifican en la capa
+     opaca, que escribe profundidad en `scene_depth` (ver `docs/native-mods.md` §«horizon:behaviour»: *«omitted alpha
+     stays 1. Fading particles use the blended particle layer»*, y `shaders-reference-0.2.md`: *«opaque particle»* vs
+     *«translucent surfaces that write no depth»*). Sin shader pack el fallo pasa inadvertido porque no hay pasada de
+     posproceso que lea `scene_depth` contra el cielo; con el pack, `etapas/post/02-volumen.wgsl` y `03-composicion.wgsl`
+     ven `input.depth > 0` (`p.es_cielo == false`) en todo el rectángulo del cartel y cortan la niebla volumétrica y las
+     nubes con esquinas rectas de 90°.
+  2. **Doble escalado de tamaño por distancia (`src/clima_mod.rs:669` y `src/clima_mod.rs:264`):** al encolar la
+     partícula se guardaba `tamano_base = cl::tamano_por_distancia(d.tamano, dist, d.escala_distancia)`, y luego cada
+     tick volvía a aplicar `cl::tamano_por_distancia(tamano_base, dist, d.escala_distancia)`. A 30 bloques, `tamano = 2.0`
+     pasaba a `8.0` al nacer y a `32.0` (semiancho → cartel de 64×64 bloques) en el primer tick, sobresaliendo muy por
+     encima de las copas de los árboles.
+  3. **Sin distancia mínima de nacimiento ni desvanecido al acercarse (`src/clima_mod.rs:605`, `634-641`, `279-284`):**
+     las partículas de niebla podían nacer pegadas a la cámara y tapar media pantalla.
+- **Arreglo:**
+  - `assets/vulpe/particles/niebla.json` y `bruma_polvo.json` (y `tools/generar-texturas-clima.py`): se añade
+    `"horizon:behaviour": { "alpha": [0.01, 0.0] }` para que Horizon las dibuje en la capa mezclada translúcida (sin
+    escritura de profundidad y empezando casi transparentes en el fotograma 0 hasta el primer tick del proveedor).
+  - `src/engine/src/clima.rs`: constantes `MIN_DISTANCIA_NIEBLA` (8 bloques), `DISTANCIA_CERO_NIEBLA_CERCA` (4),
+    `DISTANCIA_PLENA_NIEBLA_CERCA` (12) y `MAX_TAMANO_NIEBLA` (3,5 bloques de semiancho → ~7 bloques totales); funciones
+    `tamano_niebla` y `atenuacion_cercania_niebla`; `tamano = 1.5, escala_distancia = 0.08` para `NieblaVertical` y
+    `NieblaVerticalDespues`.
+  - `src/clima_mod.rs`: se guarda `d.tamano` sin escalar en `SpawnInfo.tamano_base` (elimina el doble escalado), se
+    aplica `cl::tamano_niebla` en cada tick, se exige `dist >= cl::MIN_DISTANCIA_NIEBLA` al nacer y se multiplica `alfa`
+    por `cl::atenuacion_cercania_niebla(dist)`.
+- **Verificación (`vulpe-pruebas`, `VulpePrueba`, `/time set 6000`, `weather thunder` 20 s → `weather clear`, vuelo
+  `(166, 95, 152..202)`):**
+  - Capturas en `vulpe-horizon/build/repro/n06-antes-*.png` frente a `n06-despues-*.png`: desaparecen por completo los
+    rectángulos blancos y quedan bancos de niebla suaves sobre el bosque.
+  - Coste (20 s en el bosque tras la lluvia, `horizon-ctl bench 20`):
+    - Antes (`native-dd67b76-2ae03345fa04`): **49,47 fps**, CPU 4,10 ms (`tick` 0,50 ms), GPU 13,43 ms.
+    - Después (`native-dd67b76-9948028bfff2`): **53,54 fps**, CPU 4,04 ms (`tick` 0,46 ms), GPU 12,05 ms (−1,38 ms GPU).

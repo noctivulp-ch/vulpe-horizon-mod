@@ -142,7 +142,7 @@ def juego_girado(nombre, dibujar, rnd):
     (PART / f"{nombre}.json").write_text(json.dumps({"textures": texturas}, indent=2) + "\n")
 
 
-def juego(nombre, cuantas, dibujar, por_sprite, rnd):
+def juego(nombre, cuantas, dibujar, por_sprite, rnd, extra=None):
     texturas = []
     for i in range(cuantas):
         img = Image.new("RGBA", (LADO, LADO), (0, 0, 0, 0))
@@ -151,7 +151,10 @@ def juego(nombre, cuantas, dibujar, por_sprite, rnd):
         archivo = f"{nombre}_{i}"
         img.save(TEX / f"{archivo}.png")
         texturas.append(f"vulpe:{archivo}")
-    (PART / f"{nombre}.json").write_text(json.dumps({"textures": texturas}, indent=2) + "\n")
+    datos = {"textures": texturas}
+    if extra:
+        datos.update(extra)
+    (PART / f"{nombre}.json").write_text(json.dumps(datos, indent=2) + "\n")
 
 
 def main():
@@ -163,10 +166,10 @@ def main():
     juego("nieve", 16, copo, 1, rnd)
     juego("nieve_fuerte", 4, copo, 4, rnd)
     juego("polvo", 3, polvo, 1, rnd)
-    juego("bruma_polvo", 1, bruma_polvo, 1, rnd)
+    juego("bruma_polvo", 1, bruma_polvo, 1, rnd, extra={"horizon:behaviour": {"alpha": [0.01, 0.0]}})
     juego_girado("matorral", matorral, rnd)
     juego("reguero", 1, reguero, 1, rnd)
-    juego("niebla", 1, niebla, 1, rnd)
+    juego("niebla", 1, niebla, 1, rnd, extra={"horizon:behaviour": {"alpha": [0.01, 0.0]}})
 
 
 if __name__ == "__main__":

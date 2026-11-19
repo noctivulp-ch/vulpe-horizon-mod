@@ -8,6 +8,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 /// Tope real de distancia de nacimiento de `ParticleEngine::controlled` en Horizon (32 bloques).
 pub const MAX_DISTANCIA_CONTROLADA: f32 = 31.5;
 
+/// Distancia mínima a la cámara para que nazca un banco de niebla (bloques); evita que tape la pantalla.
+pub const MIN_DISTANCIA_NIEBLA: f32 = 8.0;
+
+/// Rango de desvanecido de un banco de niebla al acercarse la cámara (0 a ≤ 4 bloques, 1 a ≥ 12 bloques).
+pub const DISTANCIA_CERO_NIEBLA_CERCA: f32 = 4.0;
+pub const DISTANCIA_PLENA_NIEBLA_CERCA: f32 = 12.0;
+
+/// Tope de semiancho de un banco de niebla en bloques (3,5 -> ~7 bloques de ancho total).
+pub const MAX_TAMANO_NIEBLA: f32 = 3.5;
+
 /// Ajustes de la sección `[clima]` de `config/vulpe-horizon.toml` (valores por defecto de Particle Rain y del dueño).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClimaConfig {
@@ -305,14 +315,14 @@ impl Efecto {
                 sprites: "vulpe:niebla", num_sprites: 1, origen: Origen::Superficie,
                 precipitacion: Precipitacion::Lluvia, solo_tormenta: false, solo_overworld: true,
                 densidad: 0.5, gravedad: 0.0, viento: 0.0, viento_tormenta: 0.0, rebote: 0.0,
-                tamano: 2.0, escala_distancia: 0.1, opacidad: 1.0, desvanecido: Desvanecido::EntradaSalida,
+                tamano: 1.5, escala_distancia: 0.08, opacidad: 1.0, desvanecido: Desvanecido::EntradaSalida,
                 tinte: Tinte::Niebla, translucida: true, vida: 250,
             },
             Efecto::NieblaVerticalDespues => DatosEfecto {
                 sprites: "vulpe:niebla", num_sprites: 1, origen: Origen::Superficie,
                 precipitacion: Precipitacion::Lluvia, solo_tormenta: false, solo_overworld: true,
                 densidad: 0.5, gravedad: 0.0, viento: 0.0, viento_tormenta: 0.0, rebote: 0.0,
-                tamano: 2.0, escala_distancia: 0.1, opacidad: 1.0, desvanecido: Desvanecido::EntradaSalida,
+                tamano: 1.5, escala_distancia: 0.08, opacidad: 1.0, desvanecido: Desvanecido::EntradaSalida,
                 tinte: Tinte::Niebla, translucida: true, vida: 250,
             },
         }
@@ -606,6 +616,18 @@ pub fn tamano_por_distancia(base: f32, distancia: f32, escala: f32) -> f32 {
         return base;
     }
     base + base * distancia * escala
+}
+
+/// Tamaño de un banco de niebla escalado por distancia y acotado a `MAX_TAMANO_NIEBLA`.
+pub fn tamano_niebla(base: f32, distancia: f32, escala: f32) -> f32 {
+    tamano_por_distancia(base, distancia, escala).min(MAX_TAMANO_NIEBLA)
+}
+
+/// Atenuación de un banco de niebla al acercarse a la cámara (0 a ≤ 4 bloques, 1 a ≥ 12 bloques).
+pub fn atenuacion_cercania_niebla(distancia: f32) -> f32 {
+    ((distancia - DISTANCIA_CERO_NIEBLA_CERCA)
+        / (DISTANCIA_PLENA_NIEBLA_CERCA - DISTANCIA_CERO_NIEBLA_CERCA))
+        .clamp(0.0, 1.0)
 }
 
 /// Opacidad por distancia, vida o salida (`CustomParticle.tickFading`), multiplicada por `opacidad` y `nivel_clima`.
@@ -928,5 +950,22 @@ mod tests {
         assert_eq!(c.tope, 800);
         let ida = ClimaConfig::from_toml_str(&ClimaConfig::default().to_toml_section());
         assert_eq!(ida, ClimaConfig::default());
+    }
+
+    #[test]
+    fn niebla_acota_tamano_y_desvanece_al_acercarse() {
+        let d = Efecto::NieblaVerticalDespues.datos();
+        assert!(tamano_niebla(d.tamano, 8.0, d.escala_distancia) <= MAX_TAMANO_NIEBLA);
+        assert_eq!(tamano_niebla(d.tamano, 31.5, d.escala_distancia), MAX_TAMANO_NIEBLA);
+        assert_eq!(atenuacion_cercania_niebla(0.0), 0.0);
+        assert_eq!(atenuacion_cercania_niebla(DISTANCIA_CERO_NIEBLA_CERCA), 0.0);
+        assert!((atenuacion_cercania_niebla(8.0) - 0.5).abs() < 1e-5);
+        assert_eq!(atenuacion_cercania_niebla(DISTANCIA_PLENA_NIEBLA_CERCA), 1.0);
+        assert_eq!(atenuacion_cercania_niebla(25.0), 1.0);
+        // Niebla de bioma (pantanos) comparte tamaño acotado y desvanecido suave.
+        let db = Efecto::NieblaVertical.datos();
+        assert_eq!(db.tamano, d.tamano);
+        assert_eq!(db.escala_distancia, d.escala_distancia);
+        assert!(db.translucida);
     }
 }
