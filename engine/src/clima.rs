@@ -29,6 +29,8 @@ pub struct ClimaConfig {
     pub humo: bool,
     /// Ondas de gotas en el agua (`ripple`): apagado por defecto (Horizon solo dibuja carteles a cámara, sin orientación horizontal).
     pub ondas: bool,
+    /// Regueros de agua que escurren por paredes y cristales (`streak`).
+    pub reguero: bool,
     /// Multiplicador de la densidad de todos los efectos.
     pub densidad: f32,
     /// Tope de partículas vivas (`perf.particleAmount`).
@@ -59,6 +61,7 @@ impl Default for ClimaConfig {
             salpicadura: true,
             humo: true,
             ondas: false,
+            reguero: true,
             densidad: 1.0,
             tope: 1500,
             densidad_tormenta: 1.5,
@@ -100,6 +103,7 @@ impl ClimaConfig {
                 "salpicadura" => c.salpicadura = b,
                 "humo" => c.humo = b,
                 "ondas" => c.ondas = b,
+                "reguero" => c.reguero = b,
                 "densidad" => c.densidad = f.unwrap_or(c.densidad).clamp(0.0, 4.0),
                 "tope" => c.tope = f.map(|x| x.clamp(0.0, 20000.0) as u32).unwrap_or(c.tope),
                 "densidad_tormenta" => c.densidad_tormenta = f.unwrap_or(c.densidad_tormenta).clamp(0.0, 4.0),
@@ -122,13 +126,14 @@ impl ClimaConfig {
              # Polvo de arena y matorrales rodantes en desiertos y mesas con lluvia/tormenta\npolvo = {}\npolvo_raso = {}\nbruma_polvo = {}\nmatorral = {}\n\
              # Lava y calor: salpicaduras y humo con lluvia\nsalpicadura = {}\nhumo = {}\n\
              # Agua: ondas (`ripple`), apagado por defecto (Horizon no tiene partículas horizontales)\nondas = {}\n\
+             # Paredes y cristales: regueros de agua (`streak`)\nreguero = {}\n\
              # Densidad relativa (0 .. 4)\ndensidad = {:.2}\n# Tope de partículas vivas\ntope = {}\n\
              # Densidad con tormenta\ndensidad_tormenta = {:.2}\n# Radio donde nacen, bloques (4 .. 32)\ndistancia = {:.1}\n\
              # Alcance de efectos de superficie, bloques (8 .. 100; Horizon acota a 32)\nalcance_superficie = {:.1}\n\
              # Viento: fuerza, ráfagas, modulación y más viento con la altura\nviento_fuerza = {:.3}\nviento_rafagas = {:.3}\n\
              viento_modulacion = {:.3}\nviento_altura = {}\n",
             self.lluvia, self.nieve, self.polvo, self.polvo_raso, self.bruma_polvo, self.matorral,
-            self.salpicadura, self.humo, self.ondas,
+            self.salpicadura, self.humo, self.ondas, self.reguero,
             self.densidad, self.tope, self.densidad_tormenta, self.distancia, self.alcance_superficie,
             self.viento_fuerza, self.viento_rafagas, self.viento_modulacion, self.viento_altura
         )
@@ -331,6 +336,30 @@ pub fn es_bloque_caliente(nombre: &str, es_lava: bool) -> bool {
         n,
         "lava" | "magma_block" | "netherrack" | "fire" | "soul_fire" | "campfire" | "soul_campfire"
     )
+}
+
+/// Si el bloque admite regueros de agua (`streak`: `#minecraft:impermeable`, `#c:glass_panes`,
+/// `#minecraft:mineable/pickaxe`).
+pub fn es_bloque_reguero(nombre: &str) -> bool {
+    let n = nombre.rsplit(':').next().unwrap_or(nombre);
+    n.contains("glass")
+        || n.contains("stone")
+        || n.contains("brick")
+        || n.contains("deepslate")
+        || n.contains("granite")
+        || n.contains("diorite")
+        || n.contains("andesite")
+        || n.contains("tuff")
+        || n.contains("basalt")
+        || n.contains("terracotta")
+        || n.contains("concrete")
+        || n.contains("quartz")
+        || n.contains("prismarine")
+        || n.contains("copper")
+        || n.contains("iron")
+        || n.contains("gold")
+        || n.contains("obsidian")
+        || n.contains("ice")
 }
 
 /// Si el bioma pertenece al Overworld (`#c:in_overworld`).
@@ -708,6 +737,9 @@ mod tests {
         assert!(es_bloque_caliente("minecraft:magma_block", false));
         assert!(es_bloque_caliente("minecraft:fire", false));
         assert!(!es_bloque_caliente("minecraft:stone", false));
+        assert!(es_bloque_reguero("minecraft:glass"));
+        assert!(es_bloque_reguero("minecraft:stone_bricks"));
+        assert!(!es_bloque_reguero("minecraft:oak_planks"));
     }
 
     #[test]

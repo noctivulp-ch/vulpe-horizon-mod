@@ -98,6 +98,18 @@ def matorral(img, _rnd):
                     img.putpixel((x, y), col)
 
 
+def reguero(img, _rnd):
+    """Gotita vertical fina que escurre por paredes y cristales (se tiñe con color de agua)."""
+    cx = LADO // 2
+    for y in range(6, 26):
+        t = (y - 6) / 19.0
+        radio = 1 if t < 0.7 else 2
+        a = int(80 + 150 * t)
+        for dx in range(-radio, radio + 1):
+            borde = abs(dx) == radio and radio > 1
+            img.putpixel((cx + dx, y), (235, 240, 250, a // 2 if borde else a))
+
+
 def juego_girado(nombre, dibujar, rnd):
     """Genera 4 fotogramas girados 0/90/180/270° para simular giro en Horizon."""
     base = Image.new("RGBA", (LADO, LADO), (0, 0, 0, 0))
@@ -134,6 +146,7 @@ def main():
     juego("polvo", 3, polvo, 1, rnd)
     juego("bruma_polvo", 1, bruma_polvo, 1, rnd)
     juego_girado("matorral", matorral, rnd)
+    juego("reguero", 1, reguero, 1, rnd)
 
 
 if __name__ == "__main__":
