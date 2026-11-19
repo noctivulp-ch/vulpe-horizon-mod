@@ -27,6 +27,35 @@ pub const COPOS_CAEN_S: f32 = 8.0;
 pub const MONTON_CRECE_S: f32 = 18.0;
 pub const MONTON_FUNDE_S: f32 = 45.0;
 
+/// Tiempos y alcance del vaho del aliento (spec 27 §4).
+pub const VAHO_DISTANCIA_MAX: f64 = 1.5;
+pub const VAHO_CRECE_S: f32 = 6.0;
+pub const VAHO_DESVANECE_S: f32 = 5.0;
+
+/// Cierto si el identificador de bloque corresponde a un cristal o panel de cristal (27).
+pub fn es_bloque_cristal(id: &str) -> bool {
+    let nombre = id.rsplit(':').next().unwrap_or(id);
+    nombre == "glass"
+        || nombre == "glass_pane"
+        || nombre == "tinted_glass"
+        || nombre.ends_with("_stained_glass")
+        || nombre.ends_with("_stained_glass_pane")
+}
+
+/// Punto más cercano de la caja unitaria de un bloque `[bx, by, bz]` a una posición de cámara.
+pub fn punto_mas_cercano_bloque(cam: [f64; 3], bloque: [i32; 3]) -> ([f64; 3], f64) {
+    let bx = f64::from(bloque[0]);
+    let by = f64::from(bloque[1]);
+    let bz = f64::from(bloque[2]);
+    let px = cam[0].clamp(bx, bx + 1.0);
+    let py = cam[1].clamp(by, by + 1.0);
+    let pz = cam[2].clamp(bz, bz + 1.0);
+    let dx = px - cam[0];
+    let dy = py - cam[1];
+    let dz = pz - cam[2];
+    ([px, py, pz], (dx * dx + dy * dy + dz * dz).sqrt())
+}
+
 /// Paso máximo de tiempo entre observaciones para no saltar temporizadores tras una pausa.
 const MAX_DT_S: f32 = 1.0;
 
@@ -167,6 +196,7 @@ struct EstadoCristales {
     vaho_pos_mundo: [f64; 3],
     tiene_vaho_pos: bool,
     ultimo: Instant,
+    ultimo_aliento: Instant,
 }
 
 static CONFIG: Mutex<CristalesConfig> = Mutex::new(CristalesConfig {
@@ -282,6 +312,7 @@ pub fn observar_lluvia_y_frio_en(
         vaho_pos_mundo: [0.0; 3],
         tiene_vaho_pos: false,
         ultimo: ahora,
+        ultimo_aliento: ahora,
     });
 
     let dt = ahora
@@ -329,6 +360,61 @@ pub fn observar_lluvia_y_frio_en(
         viento_xz[1].clamp(-1.0, 1.0),
     ];
     *lock = Some(st);
+}
+
+/// Actualiza la memoria del vaho del aliento (parte 4): punto del cristal más cercano (< 1,5 bloques),
+/// desvanecido en ~5 s al alejarse y desactivación inmediata en modo espectador.
+pub fn observar_aliento(punto_cristal_cercano: Option<[f64; 3]>, espectador: bool) {
+    observar_aliento_en(punto_cristal_cercano, espectador, Instant::now());
+}
+
+/// Variante determinista para pruebas unitarias (parte 4).
+pub fn observar_aliento_en(
+    punto_cristal_cercano: Option<[f64; 3]>,
+    espectador: bool,
+    ahora: Instant,
+) {
+    let Ok(mut lock) = ESTADO.lock() else { return };
+    let Some(st) = lock.as_mut() else { return };
+
+    let paso = ahora
+        .saturating_duration_since(st.ultimo_aliento)
+        .as_secs_f32()
+        .clamp(0.0, MAX_DT_S);
+    st.ultimo_aliento = ahora;
+
+    st.espectador = espectador;
+    if espectador || !config().aliento {
+        st.vaho_peso = 0.0;
+        st.tiene_vaho_pos = false;
+        return;
+    }
+
+    if let Some(pt) = punto_cristal_cercano {
+        if st.escarcha > 0.01 {
+            if !st.tiene_vaho_pos || st.vaho_peso < 0.05 {
+                st.vaho_pos_mundo = pt;
+            } else {
+                // Suaviza el centro de la mancha al desplazarse junto a un ventanal.
+                let k = (paso * 6.0).clamp(0.05, 0.5) as f64;
+                st.vaho_pos_mundo = [
+                    st.vaho_pos_mundo[0] + (pt[0] - st.vaho_pos_mundo[0]) * k,
+                    st.vaho_pos_mundo[1] + (pt[1] - st.vaho_pos_mundo[1]) * k,
+                    st.vaho_pos_mundo[2] + (pt[2] - st.vaho_pos_mundo[2]) * k,
+                ];
+            }
+            st.tiene_vaho_pos = true;
+            st.vaho_peso = (st.vaho_peso + paso / VAHO_CRECE_S).min(1.0);
+            return;
+        }
+    }
+
+    if st.vaho_peso > 0.0 {
+        st.vaho_peso = (st.vaho_peso - paso / VAHO_DESVANECE_S).max(0.0);
+        if st.vaho_peso <= 0.0 {
+            st.tiene_vaho_pos = false;
+        }
+    }
 }
 
 /// Empaqueta dos valores normalizados `[0, 1]` a 12 bits cada uno en un `f32` exacto (≤ 2²⁴ − 1).
@@ -413,13 +499,14 @@ pub fn resumen_estado() -> String {
         return "n/d".to_string();
     };
     format!(
-        "lluvia={}({:.2}/sec={:.1}s) escarcha={:.2} copos={:.2} monton={:.2} nieve={} arena={} aliento={}",
+        "lluvia={}({:.2}/sec={:.1}s) escarcha={:.2} copos={:.2} monton={:.2} vaho={:.2} nieve={} arena={} aliento={}",
         cfg.lluvia.as_str(),
         st.lluvia_pico,
         st.lluvia_secado_s,
         st.escarcha,
         st.copos,
         st.monton,
+        st.vaho_peso,
         cfg.nieve.as_str(),
         cfg.arena.as_str(),
         if cfg.aliento { "sí" } else { "no" },
@@ -574,6 +661,43 @@ mod tests {
         let monton_tras = ((packed >> 16) & 255) as f32 / 255.0;
         assert!(copos_tras < 0.01, "copos deben caer en ~8 s: {copos_tras}");
         assert!(monton_tras > 0.6, "montón se funde despacio: {monton_tras}");
+        limpiar();
+    }
+
+    #[test]
+    fn test_vaho_aliento_y_espectador() {
+        let _g = test_lock();
+        limpiar();
+        set_config(CristalesConfig::default());
+        assert!(es_bloque_cristal("minecraft:glass"));
+        assert!(es_bloque_cristal("minecraft:blue_stained_glass_pane"));
+        assert!(es_bloque_cristal("minecraft:tinted_glass"));
+        assert!(!es_bloque_cristal("minecraft:stone"));
+
+        let t0 = Instant::now();
+        // Bioma frío con escarcha
+        observar_lluvia_y_frio_en(0.0, 0.0, false, -0.4, 1.0, [0.0, 0.0], t0);
+        let mut t = t0;
+        for _ in 0..6 {
+            t += Duration::from_secs(1);
+            observar_aliento_en(Some([10.0, 65.0, 20.0]), false, t);
+        }
+        let (_, m7) = shader_params(Some([10.0, 65.0, 21.0])).unwrap();
+        assert!(m7[3] > 0.9, "vaho cargado tras 6 s cerca: {}", m7[3]);
+        assert!((m7[2] - (-1.0)).abs() < 1e-3);
+
+        // Al alejarse se desvanece en ~5 s manteniendo la posición
+        t += Duration::from_secs(2);
+        observar_aliento_en(None, false, t);
+        let (_, m7_mid) = shader_params(Some([10.0, 65.0, 24.0])).unwrap();
+        assert!(m7_mid[3] > 0.4 && m7_mid[3] < 0.85, "desvaneciendo: {}", m7_mid[3]);
+
+        // En modo espectador se apaga de inmediato y marca bit 9
+        t += Duration::from_secs(1);
+        observar_aliento_en(Some([10.0, 65.0, 20.0]), true, t);
+        let (m6, m7_spec) = shader_params(Some([10.0, 65.0, 21.0])).unwrap();
+        assert_eq!(m7_spec[3], 0.0);
+        assert_ne!((m6[2] as u32) & (1 << 9), 0);
         limpiar();
     }
 }

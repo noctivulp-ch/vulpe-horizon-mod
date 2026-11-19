@@ -174,6 +174,45 @@ fn observe_glass_weather(host: &dyn ClientHost, camera_pos: Option<[f64; 3]>, da
         noche,
         viento_norm,
     );
+
+    // Parte 4 (vaho del aliento): detecta si el jugador local está en modo espectador y busca el
+    // punto más cercano de un cristal dentro de 1,5 bloques alrededor de la cámara.
+    let es_espectador = host
+        .local_player()
+        .and_then(|p| {
+            let uuid = p.uuid();
+            let tab = host.client_session().client_tab_list()?;
+            tab.entries
+                .iter()
+                .find(|e| e.uuid == uuid)
+                .map(|e| e.game_mode == mod_api::GameMode::Spectator)
+        })
+        .unwrap_or(false);
+
+    let mut mejor_punto: Option<[f64; 3]> = None;
+    let mut mejor_dist = vulpe_engine::cristales::VAHO_DISTANCIA_MAX;
+    if !es_espectador {
+        for dx in -2..=2 {
+            for dy in -2..=2 {
+                for dz in -2..=2 {
+                    let bpos = [pos[0] + dx, pos[1] + dy, pos[2] + dz];
+                    let (pt, d) = vulpe_engine::cristales::punto_mas_cercano_bloque(cam, bpos);
+                    if d > mejor_dist {
+                        continue;
+                    }
+                    let id = level
+                        .block(host, bpos)
+                        .map(|k| k.id(host))
+                        .unwrap_or_default();
+                    if vulpe_engine::cristales::es_bloque_cristal(&id) {
+                        mejor_dist = d;
+                        mejor_punto = Some(pt);
+                    }
+                }
+            }
+        }
+    }
+    vulpe_engine::cristales::observar_aliento(mejor_punto, es_espectador);
 }
 
 #[derive(Default)]
