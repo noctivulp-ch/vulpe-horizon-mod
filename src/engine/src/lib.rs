@@ -5,6 +5,7 @@
 pub mod clima;
 pub mod config;
 pub mod constants;
+pub mod cristales;
 pub mod jugador;
 pub mod table;
 
@@ -24,8 +25,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Firma base de la cabecera del formato: 1000 + versión_formato.
-pub const FORMAT_VERSION: f32 = 2.0;
-pub const FORMAT_HEADER_SIG: f32 = 1000.0 + FORMAT_VERSION; // 1002.0 (formato 2: bioma en mods[1].w)
+pub const FORMAT_VERSION: f32 = 3.0;
+pub const FORMAT_HEADER_SIG: f32 = 1000.0 + FORMAT_VERSION; // 1003.0 (formato 3: estado de cristales en mods[6..7], bit 8)
 
 /// Versión actual de la tabla unificada de parámetros.
 pub const PARAM_TABLE_VERSION: f32 = 1.0;
@@ -42,6 +43,8 @@ pub const FLAG_BIOME_VALID: u32 = 1 << 5; // Bit 5 (32)
 /// Lluvia y nieve como partículas del mod encendidas: el pack no dibuja las suyas (subsistemas/26). El bit 6 queda para
 /// la altura de entrada al agua del formato 2.
 pub const FLAG_PARTICLE_WEATHER: u32 = 1 << 7; // Bit 7 (128)
+/// Formato 3: estado con memoria y ajustes de «el tiempo en los cristales» en `mods[6]` y `mods[7]` (subsistema 27).
+pub const FLAG_GLASS_VALID: u32 = 1 << 8; // Bit 8 (256)
 
 /// Segundos que tarda el peso del bioma en subir de 0 a 1 o en bajar de 1 a 0 al cruzar una frontera.
 pub const BIOME_FADE_SECONDS: f32 = 4.0;
@@ -61,8 +64,8 @@ pub const DAY_MODULO: i64 = 16_777_216;
 /// Tiempo máximo en segundos durante el cual un rayo se considera activo para el shader (10.0 s).
 pub const LIGHTNING_ACTIVE_SECONDS: f32 = 10.0;
 
-/// Cantidad máxima de ajustes en vivo simultáneos en el formato v1 (16 floats: mods[4..8]).
-pub const MAX_LIVE_ADJUSTMENTS: usize = 16;
+/// Cantidad máxima de ajustes en vivo simultáneos en el formato v3 (8 floats: mods[4..6]; mods[6..8] son para cristales).
+pub const MAX_LIVE_ADJUSTMENTS: usize = 8;
 
 /// Registro en memoria del último rayo ocurrido en el mundo.
 #[derive(Clone, Copy, Debug)]
@@ -428,13 +431,22 @@ pub fn sync_runtime_state(
         return;
     };
 
-    // Sección [clima] (clima con partículas, port de Particle Rain): se lee del mismo archivo; si falta, se añade con
-    // los valores por defecto para que el jugador la vea.
+    // Secciones [clima] (26) y [cristales] (27): se leen del mismo archivo; si faltan, se añaden con valores por defecto.
     let cfg_file = cfg_dir.join(config::CONFIG_FILE_NAME);
-    if let Ok(texto) = std::fs::read_to_string(&cfg_file) {
+    if let Ok(mut texto) = std::fs::read_to_string(&cfg_file) {
+        let mut modificado = false;
         clima::set_config(clima::ClimaConfig::from_toml_str(&texto));
         if !texto.lines().any(|l| l.trim() == "[clima]") {
-            let _ = std::fs::write(&cfg_file, format!("{}{}", texto, clima::config().to_toml_section()));
+            texto.push_str(&clima::config().to_toml_section());
+            modificado = true;
+        }
+        cristales::set_config(cristales::CristalesConfig::from_toml_str(&texto));
+        if !texto.lines().any(|l| l.trim() == "[cristales]") {
+            texto.push_str(&cristales::config().to_toml_section());
+            modificado = true;
+        }
+        if modificado {
+            let _ = std::fs::write(&cfg_file, texto);
         }
     }
 
@@ -568,13 +580,17 @@ pub fn execute_client_command(
                 }
                 None => "n/d".to_string(),
             };
+            let cristales_info = cristales::resumen_estado();
+            if cristales::shader_params(None).is_some() {
+                flags |= FLAG_GLASS_VALID;
+            }
             let modo_cfg = config_dir
                 .and_then(|d| VulpeConfig::load_or_create(d).ok())
                 .map(|c| c.canal_fijo.as_str())
                 .unwrap_or("c");
             Some(format!(
-                "[Vulpe] mods[0]=({:.0}, {:.0}, {:.0}, {:.0}) | canal_fijo={} (modo={}) | en_vivo={}/16 | rayo={} | llamas={}",
-                FORMAT_HEADER_SIG, PARAM_TABLE_VERSION, flags as f32, live_count as f32, fixed, modo_cfg, live_count, lightning_info, llamas_info
+                "[Vulpe] mods[0]=({:.0}, {:.0}, {:.0}, {:.0}) | canal_fijo={} (modo={}) | en_vivo={}/{} | rayo={} | llamas={} | cristales={}",
+                FORMAT_HEADER_SIG, PARAM_TABLE_VERSION, flags as f32, live_count as f32, fixed, modo_cfg, live_count, MAX_LIVE_ADJUSTMENTS, lightning_info, llamas_info, cristales_info
             ))
         }
         "modo" => {
@@ -825,6 +841,11 @@ pub fn populate_shader_params_live(
     if clima::particulas_activas() {
         flags_u32 |= FLAG_PARTICLE_WEATHER;
     }
+    if let Some((m6, m7)) = cristales::shader_params(camera_pos) {
+        flags_u32 |= FLAG_GLASS_VALID;
+        params[6] = m6;
+        params[7] = m7;
+    }
     let flags = flags_u32 as f32;
 
     // mods[0] cabecera: [firma, versión_tabla, banderas, cantidad_ajustes_en_vivo]
@@ -835,14 +856,19 @@ pub fn populate_shader_params_live(
 }
 
 #[cfg(test)]
+pub(crate) static GLOBAL_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    static TEST_MUTEX: Mutex<()> = Mutex::new(());
+    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        GLOBAL_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn test_biome_category_and_fade() {
-        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = test_lock();
         assert_eq!(biome_category("minecraft:swamp"), 1);
         assert_eq!(biome_category("minecraft:bamboo_jungle"), 2);
         assert_eq!(biome_category("minecraft:pale_garden"), 3);
@@ -868,13 +894,14 @@ mod tests {
 
     #[test]
     fn test_no_clock_gives_zero_flags() {
-        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = test_lock();
         clear_live_adjustments();
         set_fixed_channel_active(false);
+        cristales::limpiar();
         let mut params = [[0.0; 4]; 8];
         populate_shader_params(None, 0.0, &mut params);
 
-        assert_eq!(params[0], [1002.0, 1.0, 0.0, 0.0]);
+        assert_eq!(params[0], [1003.0, 1.0, 0.0, 0.0]);
         assert_eq!(params[1], [0.0, 0.0, 0.0, 0.0]);
         assert_eq!(params[2], [0.0, 0.0, 0.0, -1.0]);
         assert_eq!(params[3], [0.0, 0.0, 0.0, 0.0]);
@@ -885,14 +912,15 @@ mod tests {
 
     #[test]
     fn test_day_0_sunrise() {
-        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = test_lock();
         clear_live_adjustments();
         set_fixed_channel_active(false);
+        cristales::limpiar();
         let mut params = [[0.0; 4]; 8];
         populate_shader_params(Some(0), 0.0, &mut params);
 
-        // Cabecera: versión 1002, tabla 1, banderas 5 (tiempo + estación), 0 ajustes en vivo
-        assert_eq!(params[0], [1002.0, 1.0, 5.0, 0.0]);
+        // Cabecera: versión 1003, tabla 1, banderas 5 (tiempo + estación), 0 ajustes en vivo
+        assert_eq!(params[0], [1003.0, 1.0, 5.0, 0.0]);
         // Tiempo: día 0, fase 0 (luna llena), estación 0.0 (inicio primavera), reservado 0.0
         assert_eq!(params[1], [0.0, 0.0, 0.0, 0.0]);
         // Rayo inactivo: edad negativa
@@ -901,14 +929,15 @@ mod tests {
 
     #[test]
     fn test_day_1_midday() {
-        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = test_lock();
         clear_live_adjustments();
         set_fixed_channel_active(false);
+        cristales::limpiar();
         let mut params = [[0.0; 4]; 8];
         // Día 1 al mediodía (24000 + 6000 = 30000 ticks)
         populate_shader_params(Some(30_000), 0.0, &mut params);
 
-        assert_eq!(params[0][0], 1002.0);
+        assert_eq!(params[0][0], 1003.0);
         assert_eq!(params[0][2], 5.0);
         assert_eq!(params[1][0], 1.0); // Día 1
         assert_eq!(params[1][1], 1.0); // Fase luna 1
@@ -974,7 +1003,7 @@ mod tests {
         let mut params = [[0.0; 4]; 8];
         // /time set puede provocar ticks negativos
         populate_shader_params(Some(-24_000), 0.0, &mut params);
-        assert_eq!(params[0][0], 1002.0);
+        assert_eq!(params[0][0], 1003.0);
         assert!(params[1][0] >= 0.0);
         assert!(params[1][1] >= 0.0 && params[1][1] <= 7.0);
         assert!(params[1][2] >= 0.0 && params[1][2] < 4.0);
@@ -990,7 +1019,7 @@ mod tests {
 
     #[test]
     fn test_lightning_strike_relative_to_camera() {
-        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = test_lock();
         clear_lightning_strike();
         set_fixed_channel_active(false);
         let mut params = [[0.0; 4]; 8];
@@ -1016,7 +1045,7 @@ mod tests {
 
     #[test]
     fn test_expired_lightning_strike() {
-        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = test_lock();
         clear_lightning_strike();
         set_fixed_channel_active(false);
         let mut params = [[0.0; 4]; 8];
@@ -1037,7 +1066,7 @@ mod tests {
 
     #[test]
     fn test_player_state_defaults() {
-        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = test_lock();
         jugador::limpiar_fuego();
         let mut params = [[0.0; 4]; 8];
         populate_shader_params(Some(0), 0.0, &mut params);
@@ -1048,7 +1077,7 @@ mod tests {
 
     #[test]
     fn test_player_fire_shader_params() {
-        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = test_lock();
         jugador::limpiar_fuego();
         let t0 = Instant::now();
         jugador::observar_fuego_en("minecraft:fire", "minecraft:air", false, false, t0);
@@ -1115,7 +1144,9 @@ mod tests {
     }
 
     #[test]
-    fn test_live_adjustments_max_cap_16() {
+    fn test_live_adjustments_max_cap_8() {
+        let _guard = test_lock();
+        cristales::limpiar();
         let mut params = [[0.0; 4]; 8];
         let live: Vec<LiveAdjustment> = (0..20)
             .map(|i| LiveAdjustment {
@@ -1126,14 +1157,28 @@ mod tests {
 
         populate_shader_params_live(Some(0), 0.0, None, Some(&live), &mut params);
 
-        // Tope de 16 ajustes
-        assert_eq!(params[0][3], 16.0);
-        // Cada uno de los 16 floats en mods[4..8] debe estar ocupado (> 0.0)
-        for vec_idx in 4..8 {
+        // Tope de 8 ajustes en formato v3 (mods[4..6]; mods[6..8] reservados a cristales)
+        assert_eq!(params[0][3], 8.0);
+        for vec_idx in 4..6 {
             for elem_idx in 0..4 {
                 assert!(params[vec_idx][elem_idx] >= 0.0);
             }
         }
+    }
+
+    #[test]
+    fn test_glass_state_in_format_3() {
+        let _guard = test_lock();
+        cristales::limpiar();
+        cristales::set_config(cristales::CristalesConfig::default());
+        let t0 = Instant::now();
+        cristales::observar_lluvia_en(1.0, 0.5, true, [-0.5, 0.25], t0);
+        let mut params = [[0.0; 4]; 8];
+        populate_shader_params_full(Some(0), 0.0, Some([0.0, 64.0, 0.0]), &mut params);
+        assert_eq!(params[0][0], 1003.0);
+        assert_eq!((params[0][2] as u32) & FLAG_GLASS_VALID, FLAG_GLASS_VALID);
+        assert!(params[6][0] > 0.0);
+        cristales::limpiar();
     }
 
     #[test]
@@ -1148,7 +1193,7 @@ mod tests {
 
     #[test]
     fn test_fixed_channel_flag_in_shader_params() {
-        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = test_lock();
         clear_lightning_strike();
         set_fixed_channel_active(false);
         let mut params = [[0.0; 4]; 8];
@@ -1167,7 +1212,7 @@ mod tests {
 
     #[test]
     fn test_observe_client_bolt_deduplicates_by_id() {
-        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = test_lock();
         clear_lightning_strike();
         set_fixed_channel_active(false);
 
@@ -1190,7 +1235,7 @@ mod tests {
 
     #[test]
     fn test_sync_runtime_state_and_commands() {
-        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = test_lock();
         clear_lightning_strike();
         clear_live_adjustments();
         set_fixed_channel_active(false);

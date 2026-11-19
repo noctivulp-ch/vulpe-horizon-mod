@@ -114,6 +114,46 @@ fn observe_player_fire(host: &dyn ClientHost) {
     vulpe_engine::jugador::observar_fuego(&bloque_pies, &bloque_cabeza, agua_extra, bajo_lluvia);
 }
 
+/// Observa el clima de los cristales (N-08, parte 1: lluvia, secado de 30 s y viento de 26).
+fn observe_glass_weather(host: &dyn ClientHost, camera_pos: Option<[f64; 3]>) {
+    let (Some(level), Some(cam)) = (host.level(host.dimension()), camera_pos) else {
+        vulpe_engine::cristales::limpiar();
+        return;
+    };
+    let pos = [
+        cam[0].floor() as i32,
+        cam[1].floor() as i32,
+        cam[2].floor() as i32,
+    ];
+    let (lluvia, trueno) = level.weather(host).unwrap_or((0.0, 0.0));
+    let llueve_en_bioma = level
+        .client_biome(host, pos)
+        .and_then(|b| level.biome_properties(host, &b))
+        .is_some_and(|props| {
+            if !props.has_precipitation {
+                return false;
+            }
+            let temp = if pos[1] > 80 {
+                props.temperature - (pos[1] - 80) as f32 * 0.00125
+            } else {
+                props.temperature
+            };
+            temp >= 0.15
+        });
+
+    let cfg_clima = vulpe_engine::clima::config();
+    let v_raw = vulpe_engine::clima::viento(
+        cam[0],
+        cam[1],
+        cam[2],
+        vulpe_engine::clima::tiempo(),
+        &cfg_clima,
+    );
+    let escala = (cfg_clima.viento_fuerza * 2.0).max(0.03);
+    let viento_norm = [(v_raw[0] / escala).clamp(-1.0, 1.0), (v_raw[1] / escala).clamp(-1.0, 1.0)];
+    vulpe_engine::cristales::observar_lluvia(lluvia, trueno, llueve_en_bioma, viento_norm);
+}
+
 #[derive(Default)]
 struct VulpeMod;
 
@@ -181,6 +221,7 @@ impl Hooks for VulpeMod {
         });
         vulpe_engine::observe_camera_biome(biome.as_deref());
         observe_player_fire(host);
+        observe_glass_weather(host, camera_pos);
         let instance_dir = host.instance_dir();
         let config_dir = instance_dir.join("config");
         let active_pack = resolve_active_pack(&instance_dir);

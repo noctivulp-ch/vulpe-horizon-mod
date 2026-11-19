@@ -122,7 +122,9 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::GLOBAL_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn avanzar(t0: Instant, segundos: f32) -> Instant {
         t0 + Duration::from_secs_f32(segundos)
@@ -130,7 +132,7 @@ mod tests {
 
     #[test]
     fn test_fuego_dura_8s_y_se_apaga() {
-        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = test_lock();
         limpiar_fuego();
         assert_eq!(en_llamas(), None);
 
@@ -154,7 +156,7 @@ mod tests {
 
     #[test]
     fn test_fuego_almas_en_cabeza() {
-        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = test_lock();
         limpiar_fuego();
         let t0 = Instant::now();
         observar_fuego_en("minecraft:soul_sand", "minecraft:soul_fire", false, false, t0);
@@ -165,7 +167,7 @@ mod tests {
 
     #[test]
     fn test_lava_dura_15s_y_fuego_no_acorta() {
-        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = test_lock();
         limpiar_fuego();
         let t0 = Instant::now();
         observar_fuego_en("minecraft:lava", "minecraft:air", false, false, t0);
@@ -192,7 +194,7 @@ mod tests {
 
     #[test]
     fn test_agua_y_lluvia_apagan_al_instante() {
-        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = test_lock();
         limpiar_fuego();
         let t0 = Instant::now();
         observar_fuego_en("minecraft:fire", "minecraft:air", false, false, t0);
