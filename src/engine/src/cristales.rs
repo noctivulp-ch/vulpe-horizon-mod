@@ -21,6 +21,12 @@ pub const TEMP_UMBRAL_NIEVE: f32 = 0.15;
 pub const ESCARCHA_CRECE_S: f32 = 16.0;
 pub const ESCARCHA_RETIRA_S: f32 = 24.0;
 
+/// Tiempos de copos pegados y montón de nieve inferior (segundos, spec 27 §3).
+pub const COPOS_CRECEN_S: f32 = 3.0;
+pub const COPOS_CAEN_S: f32 = 8.0;
+pub const MONTON_CRECE_S: f32 = 18.0;
+pub const MONTON_FUNDE_S: f32 = 45.0;
+
 /// Paso máximo de tiempo entre observaciones para no saltar temporizadores tras una pausa.
 const MAX_DT_S: f32 = 1.0;
 
@@ -265,8 +271,8 @@ pub fn observar_lluvia_y_frio_en(
         lluvia_secado_s: LLUVIA_SECADO_S,
         viento_xz: [0.0, 0.0],
         escarcha: if es_nuevo { obj_escarcha * 0.7 } else { 0.0 },
-        copos: 0.0,
-        monton: 0.0,
+        copos: if es_nuevo { nevando * 0.7 } else { 0.0 },
+        monton: if es_nuevo { nevando * 0.55 } else { 0.0 },
         arena: 0.0,
         arena_roja: false,
         espectador: false,
@@ -304,6 +310,17 @@ pub fn observar_lluvia_y_frio_en(
         st.escarcha = (st.escarcha + dt / ritmo).min(obj_escarcha);
     } else if st.escarcha > obj_escarcha {
         st.escarcha = (st.escarcha - dt / ESCARCHA_RETIRA_S).max(obj_escarcha);
+    }
+
+    // Copos pegados y montón inferior de nieve (parte 3): los copos se caen en ~8 s al parar;
+    // el montón crece mientras nieva y se funde despacio (~45 s en frío, ~15 s al calentarse).
+    if nevando > 0.01 {
+        st.copos = (st.copos + dt / COPOS_CRECEN_S).min(nevando);
+        st.monton = (st.monton + dt / MONTON_CRECE_S).min(nevando);
+    } else {
+        st.copos = (st.copos - dt / COPOS_CAEN_S).max(0.0);
+        let funde_s = if frio { MONTON_FUNDE_S } else { MONTON_FUNDE_S * 0.35 };
+        st.monton = (st.monton - dt / funde_s).max(0.0);
     }
 
     // Normaliza/acota el viento de 26 a [-1, 1] conservando su dirección.
@@ -396,11 +413,13 @@ pub fn resumen_estado() -> String {
         return "n/d".to_string();
     };
     format!(
-        "lluvia={}({:.2}/sec={:.1}s) escarcha={:.2} nieve={} arena={} aliento={}",
+        "lluvia={}({:.2}/sec={:.1}s) escarcha={:.2} copos={:.2} monton={:.2} nieve={} arena={} aliento={}",
         cfg.lluvia.as_str(),
         st.lluvia_pico,
         st.lluvia_secado_s,
         st.escarcha,
+        st.copos,
+        st.monton,
         cfg.nieve.as_str(),
         cfg.arena.as_str(),
         if cfg.aliento { "sí" } else { "no" },
@@ -522,6 +541,39 @@ mod tests {
         let (m6, _) = shader_params(None).unwrap();
         let esc_fin = ((m6[1] as u32) & 255) as f32 / 255.0;
         assert!(esc_fin < 0.01);
+        limpiar();
+    }
+
+    #[test]
+    fn test_copos_y_monton_de_nieve() {
+        let _g = test_lock();
+        limpiar();
+        set_config(CristalesConfig::default());
+        let t0 = Instant::now();
+
+        observar_lluvia_y_frio_en(1.0, 0.0, false, -0.3, 0.0, [0.0, 0.0], t0);
+        let mut t = t0;
+        for _ in 0..12 {
+            t += Duration::from_secs(1);
+            observar_lluvia_y_frio_en(1.0, 0.0, false, -0.3, 0.0, [0.0, 0.0], t);
+        }
+        let (m6, _) = shader_params(None).unwrap();
+        let packed = m6[1] as u32;
+        let copos = ((packed >> 8) & 255) as f32 / 255.0;
+        let monton = ((packed >> 16) & 255) as f32 / 255.0;
+        assert!(copos > 0.95 && monton > 0.95, "copos={copos} monton={monton}");
+
+        // Al parar de nevar: en 9 s los copos ya cayeron pero el montón sigue parcialmente ahí.
+        for _ in 0..9 {
+            t += Duration::from_secs(1);
+            observar_lluvia_y_frio_en(0.0, 0.0, false, -0.3, 0.0, [0.0, 0.0], t);
+        }
+        let (m6, _) = shader_params(None).unwrap();
+        let packed = m6[1] as u32;
+        let copos_tras = ((packed >> 8) & 255) as f32 / 255.0;
+        let monton_tras = ((packed >> 16) & 255) as f32 / 255.0;
+        assert!(copos_tras < 0.01, "copos deben caer en ~8 s: {copos_tras}");
+        assert!(monton_tras > 0.6, "montón se funde despacio: {monton_tras}");
         limpiar();
     }
 }
