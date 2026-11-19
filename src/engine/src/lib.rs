@@ -25,8 +25,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Firma base de la cabecera del formato: 1000 + versión_formato.
-pub const FORMAT_VERSION: f32 = 3.0;
-pub const FORMAT_HEADER_SIG: f32 = 1000.0 + FORMAT_VERSION; // 1003.0 (formato 3: estado de cristales en mods[6..7], bit 8)
+pub const FORMAT_VERSION: f32 = 4.0;
+pub const FORMAT_HEADER_SIG: f32 = 1000.0 + FORMAT_VERSION; // 1004.0 (formato 4: cristales v2 en mods[6..7], bit 8)
 
 /// Versión actual de la tabla unificada de parámetros.
 pub const PARAM_TABLE_VERSION: f32 = 1.0;
@@ -901,7 +901,7 @@ mod tests {
         let mut params = [[0.0; 4]; 8];
         populate_shader_params(None, 0.0, &mut params);
 
-        assert_eq!(params[0], [1003.0, 1.0, 0.0, 0.0]);
+        assert_eq!(params[0], [1004.0, 1.0, 0.0, 0.0]);
         assert_eq!(params[1], [0.0, 0.0, 0.0, 0.0]);
         assert_eq!(params[2], [0.0, 0.0, 0.0, -1.0]);
         assert_eq!(params[3], [0.0, 0.0, 0.0, 0.0]);
@@ -920,7 +920,7 @@ mod tests {
         populate_shader_params(Some(0), 0.0, &mut params);
 
         // Cabecera: versión 1003, tabla 1, banderas 5 (tiempo + estación), 0 ajustes en vivo
-        assert_eq!(params[0], [1003.0, 1.0, 5.0, 0.0]);
+        assert_eq!(params[0], [1004.0, 1.0, 5.0, 0.0]);
         // Tiempo: día 0, fase 0 (luna llena), estación 0.0 (inicio primavera), reservado 0.0
         assert_eq!(params[1], [0.0, 0.0, 0.0, 0.0]);
         // Rayo inactivo: edad negativa
@@ -937,7 +937,7 @@ mod tests {
         // Día 1 al mediodía (24000 + 6000 = 30000 ticks)
         populate_shader_params(Some(30_000), 0.0, &mut params);
 
-        assert_eq!(params[0][0], 1003.0);
+        assert_eq!(params[0][0], 1004.0);
         assert_eq!(params[0][2], 5.0);
         assert_eq!(params[1][0], 1.0); // Día 1
         assert_eq!(params[1][1], 1.0); // Fase luna 1
@@ -1003,7 +1003,7 @@ mod tests {
         let mut params = [[0.0; 4]; 8];
         // /time set puede provocar ticks negativos
         populate_shader_params(Some(-24_000), 0.0, &mut params);
-        assert_eq!(params[0][0], 1003.0);
+        assert_eq!(params[0][0], 1004.0);
         assert!(params[1][0] >= 0.0);
         assert!(params[1][1] >= 0.0 && params[1][1] <= 7.0);
         assert!(params[1][2] >= 0.0 && params[1][2] < 4.0);
@@ -1167,15 +1167,15 @@ mod tests {
     }
 
     #[test]
-    fn test_glass_state_in_format_3() {
+    fn test_glass_state_in_format_4() {
         let _guard = test_lock();
         cristales::limpiar();
         cristales::set_config(cristales::CristalesConfig::default());
         let t0 = Instant::now();
-        cristales::observar_lluvia_en(1.0, 0.5, true, [-0.5, 0.25], t0);
+        cristales::observar_clima_en(1.0, 0.5, true, -0.3, false, false, true, [-0.5, 0.25], t0);
         let mut params = [[0.0; 4]; 8];
         populate_shader_params_full(Some(0), 0.0, Some([0.0, 64.0, 0.0]), &mut params);
-        assert_eq!(params[0][0], 1003.0);
+        assert_eq!(params[0][0], 1004.0);
         assert_eq!((params[0][2] as u32) & FLAG_GLASS_VALID, FLAG_GLASS_VALID);
         assert!(params[6][0] > 0.0);
         cristales::limpiar();

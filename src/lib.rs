@@ -114,22 +114,7 @@ fn observe_player_fire(host: &dyn ClientHost) {
     vulpe_engine::jugador::observar_fuego(&bloque_pies, &bloque_cabeza, agua_extra, bajo_lluvia);
 }
 
-/// Factor de noche `[0, 1]` desde `day_time` en ticks (24 000 por día; noche entre ~12 500 y 23 500).
-fn factor_noche_ticks(day_time: Option<i64>) -> f32 {
-    let Some(t) = day_time else { return 0.0 };
-    let h = t.rem_euclid(24_000) as f32;
-    if h >= 13_000.0 && h <= 23_000.0 {
-        1.0
-    } else if h > 12_000.0 && h < 13_000.0 {
-        (h - 12_000.0) / 1_000.0
-    } else if h > 23_000.0 {
-        (24_000.0 - h) / 1_000.0
-    } else {
-        0.0
-    }
-}
-
-/// Observa el clima de los cristales (N-08, partes 1–5: lluvia/secado, escarcha, nieve, aliento y arena).
+/// Observa el clima de los cristales (27 v2, N-09: rampas globales, viento y vaho del aliento).
 fn observe_glass_weather(host: &dyn ClientHost, camera_pos: Option<[f64; 3]>, day_time: Option<i64>) {
     let (Some(level), Some(cam)) = (host.level(host.dimension()), camera_pos) else {
         vulpe_engine::cristales::limpiar();
@@ -168,19 +153,23 @@ fn observe_glass_weather(host: &dyn ClientHost, camera_pos: Option<[f64; 3]>, da
         &cfg_clima,
     );
     let escala = (cfg_clima.viento_fuerza * 2.0).max(0.03);
-    let viento_norm = [(v_raw[0] / escala).clamp(-1.0, 1.0), (v_raw[1] / escala).clamp(-1.0, 1.0)];
-    let noche = factor_noche_ticks(day_time);
-    vulpe_engine::cristales::observar_lluvia_y_frio(
+    let viento_norm = [
+        (v_raw[0] / escala).clamp(-1.0, 1.0),
+        (v_raw[1] / escala).clamp(-1.0, 1.0),
+    ];
+    let es_noche = vulpe_engine::cristales::es_noche_ticks(day_time);
+    vulpe_engine::cristales::observar_clima(
         lluvia,
         trueno,
         llueve_en_bioma,
         temp_efectiva,
-        noche,
+        bioma_seco,
+        arena_roja,
+        es_noche,
         viento_norm,
     );
 
-    // Parte 4 (vaho del aliento): detecta si el jugador local está en modo espectador y busca el
-    // punto más cercano de un cristal dentro de 1,5 bloques alrededor de la cámara.
+    // Capa 6 (vaho del aliento): detecta si el jugador local (no espectador) mira un cristal a <= 1,5 bloques.
     let es_espectador = host
         .local_player()
         .and_then(|p| {
@@ -193,31 +182,27 @@ fn observe_glass_weather(host: &dyn ClientHost, camera_pos: Option<[f64; 3]>, da
         })
         .unwrap_or(false);
 
-    let mut mejor_punto: Option<[f64; 3]> = None;
-    let mut mejor_dist = vulpe_engine::cristales::VAHO_DISTANCIA_MAX;
+    let mut punto_mirado: Option<[f64; 3]> = None;
     if !es_espectador {
-        for dx in -2..=2 {
-            for dy in -2..=2 {
-                for dz in -2..=2 {
-                    let bpos = [pos[0] + dx, pos[1] + dy, pos[2] + dz];
-                    let (pt, d) = vulpe_engine::cristales::punto_mas_cercano_bloque(cam, bpos);
-                    if d > mejor_dist {
-                        continue;
-                    }
-                    let id = level
-                        .block(host, bpos)
-                        .map(|k| k.id(host))
-                        .unwrap_or_default();
-                    if vulpe_engine::cristales::es_bloque_cristal(&id) {
-                        mejor_dist = d;
-                        mejor_punto = Some(pt);
-                    }
+        // Primero el punto exacto donde mira el jugador (crosshair_target).
+        if let Some(mod_api::CrosshairTarget::Block { pos: bpos, hit, .. }) = host.crosshair_target() {
+            let id = level
+                .block(host, [bpos.x, bpos.y, bpos.z])
+                .map(|k| k.id(host))
+                .unwrap_or_default();
+            if vulpe_engine::cristales::es_bloque_cristal(&id) {
+                let pt = hit.point;
+                let dx = pt[0] - cam[0];
+                let dy = pt[1] - cam[1];
+                let dz = pt[2] - cam[2];
+                let d = (dx * dx + dy * dy + dz * dz).sqrt();
+                if d <= vulpe_engine::cristales::VAHO_DISTANCIA_MAX {
+                    punto_mirado = Some(pt);
                 }
             }
         }
     }
-    vulpe_engine::cristales::observar_aliento(mejor_punto, es_espectador);
-    vulpe_engine::cristales::observar_arena(lluvia, trueno, bioma_seco, arena_roja);
+    vulpe_engine::cristales::observar_aliento(punto_mirado, es_espectador);
 }
 
 #[derive(Default)]

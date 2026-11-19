@@ -44,7 +44,7 @@ fn test_end_to_end_flow() {
     // firma = 1003.0, tabla = 1.0
     // banderas = 1 (tiempo) | 2 (rayo) | 4 (estación) | 16 (canal fijo) = 23.0
     // cantidad ajustes en vivo = 1.0
-    assert_eq!(params[0][0], 1003.0);
+    assert_eq!(params[0][0], 1004.0);
     assert_eq!(params[0][1], 1.0);
     assert_eq!(params[0][2], 23.0);
     assert_eq!(params[0][3], 1.0);
