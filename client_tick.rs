@@ -100,15 +100,23 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
             if d.escala_distancia > 0.0 {
                 p.size = cl::tamano_por_distancia(self.tamano_base, dist, d.escala_distancia);
             }
-            p.rgba[3] = cl::alfa_efecto(
+            let nivel_clima = match self.efecto {
+                cl::Efecto::NieblaVertical | cl::Efecto::NieblaVerticalDespues => 1.0,
+                _ => cl::lluvia(),
+            };
+            let mut alfa = cl::alfa_efecto(
                 d.desvanecido,
                 dist,
                 self.distancia_max,
                 p.age,
                 p.lifetime,
                 d.opacidad,
-                cl::lluvia(),
+                nivel_clima,
             );
+            if matches!(self.efecto, cl::Efecto::NieblaVertical | cl::Efecto::NieblaVerticalDespues) {
+                alfa = alfa.min(cl::atenuacion_vertical(p.position, cam));
+            }
+            p.rgba[3] = alfa;
             let frame = if self.efecto == cl::Efecto::Matorral {
                 let rapidez = (p.velocity[0] * p.velocity[0] + p.velocity[1] * p.velocity[1] + p.velocity[2] * p.velocity[2])
                     .sqrt() as f32;
@@ -207,7 +215,7 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
     };
     let lluvia_nieve_activas = cfg.lluvia && cfg.nieve;
     cl::set_particulas_activas(lluvia_nieve_activas);
-    let hay_alguno = lluvia_nieve_activas
+    let hay_lluvia_fx = lluvia_nieve_activas
         || cfg.polvo
         || cfg.polvo_raso
         || cfg.bruma_polvo
@@ -215,15 +223,21 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
         || cfg.salpicadura
         || cfg.humo
         || cfg.reguero;
+    let hay_niebla_fx = cfg.niebla_vertical || cfg.niebla_vertical_despues;
     // La cámara del fotograma, o la vista del juego si el gancho no la da (igual que shader_params.rs).
     let camara = game.native_camera().map(|c| c.position).unwrap_or(game.view.position);
     let (lluvia, trueno) = game.weather_levels(1.0);
     let tormenta = trueno > 0.5;
     let velocidad = cl::observar(camara, reloj.game_time.max(0) as u64, lluvia, tormenta);
+    let tras_lluvia = cl::ticks_despues_lluvia() > 0;
     if reloj.game_time % 100 == 0 {
         cl::recortar_vivas(game.particles.len() as u64);
     }
-    if !hay_alguno || lluvia <= 0.0 || cl::vivas() >= u64::from(cfg.tope) {
+    let puede_niebla = (cfg.niebla_vertical) || (cfg.niebla_vertical_despues && tras_lluvia);
+    if (!hay_lluvia_fx && !hay_niebla_fx)
+        || (lluvia <= 0.0 && !puede_niebla)
+        || cl::vivas() >= u64::from(cfg.tope)
+    {
         cl::contar_tick(0);
         cl::contar_superficie(0);
         return;
@@ -237,10 +251,11 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
     let particulas = &mut game.particles;
 
     // 1) Efectos de cielo (`tickSkyFX`): lluvia, nieve y polvo en el aire (`dust`).
-    let n_cielo = cl::densidad_cielo(&cfg, trueno, velocidad, cl::inactivo());
     let mut creadas_cielo = 0u32;
     let (mut sin_cielo, mut sin_sprite) = (0u32, 0u32);
-    for _ in 0..n_cielo {
+    if lluvia > 0.0 && (lluvia_nieve_activas || cfg.polvo) {
+        let n_cielo = cl::densidad_cielo(&cfg, trueno, velocidad, cl::inactivo());
+        for _ in 0..n_cielo {
         if cl::vivas() >= u64::from(cfg.tope) {
             break;
         }
@@ -310,6 +325,7 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
             let tinte = match d.tinte {
                 cl::Tinte::Agua => cl::tinte_agua(),
                 cl::Tinte::Mapa => cl::tinte_bloque_arena(bloque_suelo.unwrap_or("sand"), azar.siguiente()),
+                cl::Tinte::Niebla => cl::tinte_niebla(bioma.fog, lluvia),
                 cl::Tinte::Ninguno => [1.0, 1.0, 1.0],
             };
             p.rgba = [tinte[0], tinte[1], tinte[2], 0.0];
@@ -321,11 +337,12 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
             creadas_cielo += 1;
         }
     }
+    }
     cl::contar_tick(creadas_cielo);
 
-    // 2) Efectos de superficie (`tickSurfaceFX`): bruma de polvo (`dust_haze`) y matorrales (`shrub`).
+    // 2) Efectos de superficie (`tickSurfaceFX`): bruma de polvo (`dust_haze`), matorrales (`shrub`) y nieblas.
     let mut creadas_sup = 0u32;
-    if (cfg.bruma_polvo || cfg.matorral) && cl::vivas() < u64::from(cfg.tope) {
+    if ((lluvia > 0.0 && (cfg.bruma_polvo || cfg.matorral)) || puede_niebla) && cl::vivas() < u64::from(cfg.tope) {
         let n_sup = cl::densidad_superficie(&cfg, trueno, cl::inactivo_superficie());
         let alcance = cfg.alcance_superficie.min(cl::MAX_DISTANCIA_CONTROLADA);
         for _ in 0..n_sup {
@@ -352,16 +369,37 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
                 continue;
             }
             let bioma = biomes.get(chunk.biome(x, tope_y - 1, z));
-            if bioma.snows_at(x, tope_y - 1, z).is_some() || !cl::es_overworld(&bioma.name) {
+            if !cl::es_overworld(&bioma.name) {
                 continue;
             }
+            let sin_precip = bioma.snows_at(x, tope_y - 1, z).is_none();
             let nombre_bloque = facts.get(world.block(x, tope_y - 1, z)).name.as_ref();
-            if !cl::es_bloque_arena(nombre_bloque) {
-                continue;
-            }
             let probabilidad = azar.siguiente();
-            for efecto in cl::Efecto::SUPERFICIE {
+            let candidatos = [
+                cl::Efecto::BrumaPolvo,
+                cl::Efecto::Matorral,
+                cl::Efecto::NieblaVertical,
+                cl::Efecto::NieblaVerticalDespues,
+            ];
+            for efecto in candidatos {
                 if !efecto.activa(&cfg) {
+                    continue;
+                }
+                let ok = match efecto {
+                    cl::Efecto::BrumaPolvo | cl::Efecto::Matorral => {
+                        lluvia > 0.0 && sin_precip && cl::es_bloque_arena(nombre_bloque)
+                    }
+                    cl::Efecto::NieblaVertical => {
+                        cl::es_bioma_niebla_siempre(&bioma.name) && cl::es_bloque_niebla(nombre_bloque)
+                    }
+                    cl::Efecto::NieblaVerticalDespues => {
+                        tras_lluvia
+                            && !cl::es_bioma_excluido_niebla_despues(&bioma.name)
+                            && cl::es_bloque_niebla(nombre_bloque)
+                    }
+                    _ => false,
+                };
+                if !ok {
                     continue;
                 }
                 let d = efecto.datos();
@@ -393,6 +431,7 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
                 let tinte = match d.tinte {
                     cl::Tinte::Mapa => cl::tinte_bloque_arena(nombre_bloque, azar.siguiente()),
                     cl::Tinte::Agua => cl::tinte_agua(),
+                    cl::Tinte::Niebla => cl::tinte_niebla(bioma.fog, lluvia),
                     cl::Tinte::Ninguno => [1.0, 1.0, 1.0],
                 };
                 p.rgba = [tinte[0], tinte[1], tinte[2], 0.0];
@@ -406,7 +445,7 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
 
     // 3) Efectos sobre bloques (`tickBlockFX`): polvo raso (`skittering_dust`), salpicadura (`splatter`) y humo (`smoke`).
     let mut creadas_bloque = 0u32;
-    if (cfg.polvo_raso || cfg.salpicadura || cfg.humo) && cl::vivas() < u64::from(cfg.tope) {
+    if lluvia > 0.0 && (cfg.polvo_raso || cfg.salpicadura || cfg.humo) && cl::vivas() < u64::from(cfg.tope) {
         let intentos_bloque = ((24.0 * cfg.densidad) as u32).max(1);
         let r = cfg.distancia;
         for _ in 0..intentos_bloque {
@@ -516,7 +555,7 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
 
     // 4) Regueros en paredes y cristales (`streak`, `BLOCK_SIDES`).
     let mut creadas_pared = 0u32;
-    if cfg.reguero && cl::vivas() < u64::from(cfg.tope) {
+    if lluvia > 0.0 && cfg.reguero && cl::vivas() < u64::from(cfg.tope) {
         let intentos_pared = ((16.0 * cfg.densidad) as u32).max(1);
         let r = cfg.distancia;
         const DIRS: [[i8; 2]; 4] = [[1, 0], [-1, 0], [0, 1], [0, -1]];

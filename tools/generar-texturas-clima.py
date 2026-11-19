@@ -110,6 +110,25 @@ def reguero(img, _rnd):
             img.putpixel((cx + dx, y), (235, 240, 250, a // 2 if borde else a))
 
 
+def niebla(img, _rnd):
+    """Banco de niebla suave y muy traslúcido (para no doblar la niebla del pack)."""
+    cx = (LADO - 1) * 0.5
+    cy = (LADO - 1) * 0.5
+    rx = LADO * 0.48
+    ry = LADO * 0.42
+    for y in range(LADO):
+        for x in range(LADO):
+            dx = (x - cx) / rx
+            dy = (y - cy) / ry
+            d2 = dx * dx + dy * dy
+            if d2 >= 1.0:
+                continue
+            peso = (1.0 - d2) ** 2
+            a = int(peso * 85)
+            if a > 3:
+                img.putpixel((x, y), (245, 248, 255, a))
+
+
 def juego_girado(nombre, dibujar, rnd):
     """Genera 4 fotogramas girados 0/90/180/270° para simular giro en Horizon."""
     base = Image.new("RGBA", (LADO, LADO), (0, 0, 0, 0))
@@ -147,6 +166,7 @@ def main():
     juego("bruma_polvo", 1, bruma_polvo, 1, rnd)
     juego_girado("matorral", matorral, rnd)
     juego("reguero", 1, reguero, 1, rnd)
+    juego("niebla", 1, niebla, 1, rnd)
 
 
 if __name__ == "__main__":

@@ -31,6 +31,14 @@ pub struct ClimaConfig {
     pub ondas: bool,
     /// Regueros de agua que escurren por paredes y cristales (`streak`).
     pub reguero: bool,
+    /// Niebla horizontal (`fog`): apagada por defecto (Horizon no tiene orientación horizontal; doblaría `niebla_vertical`).
+    pub niebla: bool,
+    /// Bancos de niebla verticales en biomas húmedos o sombríos (`vertical_fog`).
+    pub niebla_vertical: bool,
+    /// Niebla horizontal tras la lluvia (`fog_after_rain`): apagada por defecto (mismo límite horizontal).
+    pub niebla_despues: bool,
+    /// Bancos de niebla verticales tras la lluvia, hasta 5 min (`vertical_fog_after_rain`).
+    pub niebla_vertical_despues: bool,
     /// Multiplicador de la densidad de todos los efectos.
     pub densidad: f32,
     /// Tope de partículas vivas (`perf.particleAmount`).
@@ -62,6 +70,10 @@ impl Default for ClimaConfig {
             humo: true,
             ondas: false,
             reguero: true,
+            niebla: false,
+            niebla_vertical: true,
+            niebla_despues: false,
+            niebla_vertical_despues: true,
             densidad: 1.0,
             tope: 1500,
             densidad_tormenta: 1.5,
@@ -104,6 +116,10 @@ impl ClimaConfig {
                 "humo" => c.humo = b,
                 "ondas" => c.ondas = b,
                 "reguero" => c.reguero = b,
+                "niebla" => c.niebla = b,
+                "niebla_vertical" => c.niebla_vertical = b,
+                "niebla_despues" => c.niebla_despues = b,
+                "niebla_vertical_despues" => c.niebla_vertical_despues = b,
                 "densidad" => c.densidad = f.unwrap_or(c.densidad).clamp(0.0, 4.0),
                 "tope" => c.tope = f.map(|x| x.clamp(0.0, 20000.0) as u32).unwrap_or(c.tope),
                 "densidad_tormenta" => c.densidad_tormenta = f.unwrap_or(c.densidad_tormenta).clamp(0.0, 4.0),
@@ -127,6 +143,8 @@ impl ClimaConfig {
              # Lava y calor: salpicaduras y humo con lluvia\nsalpicadura = {}\nhumo = {}\n\
              # Agua: ondas (`ripple`), apagado por defecto (Horizon no tiene partículas horizontales)\nondas = {}\n\
              # Paredes y cristales: regueros de agua (`streak`)\nreguero = {}\n\
+             # Niebla a ras del suelo (`fog` y `fog_after_rain` apagadas por falta de orientación horizontal)\n\
+             niebla = {}\nniebla_vertical = {}\nniebla_despues = {}\nniebla_vertical_despues = {}\n\
              # Densidad relativa (0 .. 4)\ndensidad = {:.2}\n# Tope de partículas vivas\ntope = {}\n\
              # Densidad con tormenta\ndensidad_tormenta = {:.2}\n# Radio donde nacen, bloques (4 .. 32)\ndistancia = {:.1}\n\
              # Alcance de efectos de superficie, bloques (8 .. 100; Horizon acota a 32)\nalcance_superficie = {:.1}\n\
@@ -134,6 +152,7 @@ impl ClimaConfig {
              viento_modulacion = {:.3}\nviento_altura = {}\n",
             self.lluvia, self.nieve, self.polvo, self.polvo_raso, self.bruma_polvo, self.matorral,
             self.salpicadura, self.humo, self.ondas, self.reguero,
+            self.niebla, self.niebla_vertical, self.niebla_despues, self.niebla_vertical_despues,
             self.densidad, self.tope, self.densidad_tormenta, self.distancia, self.alcance_superficie,
             self.viento_fuerza, self.viento_rafagas, self.viento_modulacion, self.viento_altura
         )
@@ -170,6 +189,7 @@ pub enum Tinte {
     Ninguno,
     Agua,
     Mapa,
+    Niebla,
 }
 
 /// Efectos de partículas controladas con los datos de `particles.json` de Particle Rain.
@@ -183,6 +203,8 @@ pub enum Efecto {
     PolvoRaso,
     BrumaPolvo,
     Matorral,
+    NieblaVertical,
+    NieblaVerticalDespues,
 }
 
 /// Datos de un efecto (`ParticleData`).
@@ -279,6 +301,20 @@ impl Efecto {
                 tamano: 0.55, escala_distancia: 0.0, opacidad: 1.0, desvanecido: Desvanecido::Distancia,
                 tinte: Tinte::Ninguno, translucida: false, vida: 3000,
             },
+            Efecto::NieblaVertical => DatosEfecto {
+                sprites: "vulpe:niebla", num_sprites: 1, origen: Origen::Superficie,
+                precipitacion: Precipitacion::Lluvia, solo_tormenta: false, solo_overworld: true,
+                densidad: 0.5, gravedad: 0.0, viento: 0.0, viento_tormenta: 0.0, rebote: 0.0,
+                tamano: 2.0, escala_distancia: 0.1, opacidad: 1.0, desvanecido: Desvanecido::EntradaSalida,
+                tinte: Tinte::Niebla, translucida: true, vida: 250,
+            },
+            Efecto::NieblaVerticalDespues => DatosEfecto {
+                sprites: "vulpe:niebla", num_sprites: 1, origen: Origen::Superficie,
+                precipitacion: Precipitacion::Lluvia, solo_tormenta: false, solo_overworld: true,
+                densidad: 0.5, gravedad: 0.0, viento: 0.0, viento_tormenta: 0.0, rebote: 0.0,
+                tamano: 2.0, escala_distancia: 0.1, opacidad: 1.0, desvanecido: Desvanecido::EntradaSalida,
+                tinte: Tinte::Niebla, translucida: true, vida: 250,
+            },
         }
     }
 
@@ -291,6 +327,8 @@ impl Efecto {
             Efecto::PolvoRaso => c.polvo_raso,
             Efecto::BrumaPolvo => c.bruma_polvo,
             Efecto::Matorral => c.matorral,
+            Efecto::NieblaVertical => c.niebla_vertical,
+            Efecto::NieblaVerticalDespues => c.niebla_vertical_despues,
         }
     }
 }
@@ -360,6 +398,80 @@ pub fn es_bloque_reguero(nombre: &str) -> bool {
         || n.contains("gold")
         || n.contains("obsidian")
         || n.contains("ice")
+}
+
+/// Biomas con niebla permanente (`fog` / `vertical_fog`: `#c:is_wet`, `#c:is_spooky`, `#c:climate_wet`).
+pub fn es_bioma_niebla_siempre(bioma: &str) -> bool {
+    let n = bioma.rsplit(':').next().unwrap_or(bioma);
+    matches!(
+        n,
+        "swamp"
+            | "mangrove_swamp"
+            | "jungle"
+            | "sparse_jungle"
+            | "bamboo_jungle"
+            | "dark_forest"
+            | "pale_garden"
+            | "lush_caves"
+            | "mushroom_fields"
+            | "river"
+    )
+}
+
+/// Biomas excluidos de la niebla tras la lluvia (`fog_after_rain`: `plains`, `meadow`, `#c:is_windswept`).
+pub fn es_bioma_excluido_niebla_despues(bioma: &str) -> bool {
+    let n = bioma.rsplit(':').next().unwrap_or(bioma);
+    matches!(n, "plains" | "meadow") || n.starts_with("windswept_")
+}
+
+/// Bloques sobre los que nace la niebla de superficie (`#minecraft:dirt`, `#minecraft:substrate_overworld`).
+pub fn es_bloque_niebla(nombre: &str) -> bool {
+    let n = nombre.rsplit(':').next().unwrap_or(nombre);
+    matches!(
+        n,
+        "dirt"
+            | "grass_block"
+            | "podzol"
+            | "coarse_dirt"
+            | "rooted_dirt"
+            | "mycelium"
+            | "mud"
+            | "muddy_mangrove_roots"
+            | "moss_block"
+            | "pale_moss_block"
+            | "stone"
+            | "deepslate"
+            | "granite"
+            | "diorite"
+            | "andesite"
+            | "tuff"
+            | "gravel"
+            | "sand"
+            | "red_sand"
+            | "clay"
+            | "snow_block"
+    )
+}
+
+/// Tinte de niebla (`TintType.FOG`): color de niebla del bioma modulado por la lluvia.
+pub fn tinte_niebla(color_bioma: Option<u32>, lluvia: f32) -> [f32; 3] {
+    let c = color_bioma.unwrap_or(0xC0D8FF);
+    let mul = 0.7 + (1.0 - lluvia.clamp(0.0, 1.0)) * 0.2;
+    [
+        (((c >> 16) & 0xFF) as f32 / 255.0) * mul,
+        (((c >> 8) & 0xFF) as f32 / 255.0) * mul,
+        ((c & 0xFF) as f32 / 255.0) * mul,
+    ]
+}
+
+/// Atenuación por ángulo vertical hacia la cámara (`CustomParticle.tickFading` para `RotationType.VERTICAL`).
+pub fn atenuacion_vertical(pos: [f64; 3], cam: [f64; 3]) -> f32 {
+    let dx = (pos[0] - cam[0]) as f32;
+    let dy = (pos[1] - cam[1]).abs() as f32;
+    let dz = (pos[2] - cam[2]) as f32;
+    let horiz = (dx * dx + dz * dz).sqrt();
+    let ang = dy.atan2(horiz);
+    (-(ang.min(std::f32::consts::FRAC_PI_4) / std::f32::consts::FRAC_PI_4) + 1.0).clamp(0.0, 1.0)
 }
 
 /// Si el bioma pertenece al Overworld (`#c:in_overworld`).
@@ -544,6 +656,8 @@ static TIEMPO: AtomicU64 = AtomicU64::new(0);
 static TRUENO: AtomicBool = AtomicBool::new(false);
 static PARTICULAS_ACTIVAS: AtomicBool = AtomicBool::new(false);
 static LLUVIA: AtomicU64 = AtomicU64::new(0);
+static ESTABA_LLOVIENDO: AtomicBool = AtomicBool::new(false);
+static TICKS_DESPUES_LLUVIA: AtomicU64 = AtomicU64::new(0);
 static TICKS_SIN_CREAR: AtomicU64 = AtomicU64::new(1000);
 static TICKS_SIN_SUPERFICIE: AtomicU64 = AtomicU64::new(1000);
 static VIVAS: AtomicU64 = AtomicU64::new(0);
@@ -561,7 +675,25 @@ pub fn observar(camara: [f64; 3], tiempo_juego: u64, lluvia: f32, tormenta: bool
     TIEMPO.store(tiempo_juego, Ordering::Relaxed);
     LLUVIA.store(u64::from(lluvia.clamp(0.0, 1.0).to_bits()), Ordering::Relaxed);
     TRUENO.store(tormenta, Ordering::Relaxed);
+    let llueve = lluvia > 0.0;
+    let antes = ESTABA_LLOVIENDO.swap(llueve, Ordering::Relaxed);
+    if llueve {
+        TICKS_DESPUES_LLUVIA.store(0, Ordering::Relaxed);
+    } else if antes {
+        // Periodo tras la lluvia (`ParticleSpawner.onWeatherChange`): de 1 a 5 minutos (1200..6000 ticks).
+        let duracion = 1200 + (tiempo_juego.wrapping_mul(2_654_435_761) % 4800);
+        TICKS_DESPUES_LLUVIA.store(duracion, Ordering::Relaxed);
+    } else {
+        let _ = TICKS_DESPUES_LLUVIA.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.saturating_sub(1))
+        });
+    }
     velocidad
+}
+
+/// Ticks restantes de niebla tras la lluvia (`ParticleSpawner.afterWeatherTicksLeft`).
+pub fn ticks_despues_lluvia() -> u64 {
+    TICKS_DESPUES_LLUVIA.load(Ordering::Relaxed)
 }
 
 pub fn lluvia() -> f32 {
@@ -740,6 +872,27 @@ mod tests {
         assert!(es_bloque_reguero("minecraft:glass"));
         assert!(es_bloque_reguero("minecraft:stone_bricks"));
         assert!(!es_bloque_reguero("minecraft:oak_planks"));
+        assert!(es_bioma_niebla_siempre("minecraft:swamp"));
+        assert!(!es_bioma_niebla_siempre("minecraft:desert"));
+        assert!(es_bioma_excluido_niebla_despues("minecraft:plains"));
+        assert!(es_bioma_excluido_niebla_despues("minecraft:windswept_hills"));
+        assert!(!es_bioma_excluido_niebla_despues("minecraft:forest"));
+        assert!(es_bloque_niebla("minecraft:grass_block"));
+        let tn = tinte_niebla(Some(0xC0D8FF), 0.0);
+        assert!(tn[2] > tn[0] && tn[2] <= 0.91);
+        assert!((atenuacion_vertical([10.0, 0.0, 0.0], [0.0, 0.0, 0.0]) - 1.0).abs() < 1e-5);
+        assert!(atenuacion_vertical([1.0, 10.0, 0.0], [0.0, 0.0, 0.0]) < 1e-5);
+    }
+
+    #[test]
+    fn niebla_despues_de_lluvia_se_activa_al_parar() {
+        observar([0.0; 3], 100, 1.0, false);
+        assert_eq!(ticks_despues_lluvia(), 0);
+        observar([0.0; 3], 101, 0.0, false);
+        let t = ticks_despues_lluvia();
+        assert!((1200..6000).contains(&t), "{t}");
+        observar([0.0; 3], 102, 0.0, false);
+        assert_eq!(ticks_despues_lluvia(), t - 1);
     }
 
     #[test]

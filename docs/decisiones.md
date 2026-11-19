@@ -193,3 +193,29 @@ Especificación: `vulpe-horizon-spec/subsistemas/26-clima-de-particle-rain.md` y
   la superficie del agua; dibujado como cartel mirando a la cámara sobresale verticalmente y se recorta contra el agua.
   Comprobado en el pack (`vulpe-horizon/nucleo/agua/olas.wgsl`): el pack solo dibuja olas oceánicas, no ondas de gotas
   de lluvia, así que no habría duplicación cuando Horizon añada orientación horizontal.
+- **Niebla horizontal (`fog`, `fog_after_rain`):** se dejan **apagados por defecto** (`niebla = false`,
+  `niebla_despues = false`) por el mismo motivo (falta orientación `HORIZONTAL`; como carteles a cámara doblarían a
+  `vertical_fog` y `vertical_fog_after_rain`).
+- **Efectos activos en esta etapa** (cada uno con su interruptor en `[clima]` de `config/vulpe-horizon.toml`,
+  respetando `tope`):
+  - **Polvo de arena (`polvo`, `polvo_raso`, `bruma_polvo`):** `dust` (cielo), `skittering_dust` (bloques, con rebote
+    en suelo y paredes hasta 3 rebotes laterales) y `dust_haze` (superficie, con escala por distancia), sobre arena,
+    arenisca, terracota y tierra gruesa en biomas sin precipitación del Overworld, con tinte por bloque y viento.
+  - **Matorrales rodantes (`matorral`):** `shrub` adaptado a partícula controlada con 4 fotogramas girados 90° que
+    avanzan con la velocidad y rebotan con el viento (sin entidades `BlockDisplay`).
+  - **Lava y calor (`salpicadura`, `humo`):** `splatter` (`ParticleType::Rain` con viento en bloques no lava) y `smoke`
+    (`ParticleType::Smoke` sobre lava, magma, netherrack, fuego y hogueras con acceso al cielo).
+  - **Paredes (`reguero`):** `streak` en caras laterales de cristal y piedra/ladrillo, con gravedad intermitente,
+    desvanecido al chocar o acabar el muro y goteo (`ParticleType::DrippingWater`) en el borde inferior.
+  - **Niebla vertical (`niebla_vertical`, `niebla_vertical_despues`):** `vertical_fog` (permanente en biomas húmedos o
+    sombríos) y `vertical_fog_after_rain` (de 1 a 5 minutos tras parar la lluvia, fuera de llanuras/prados/windswept),
+    con desvanecido `IN_AND_OUT`, atenuación por ángulo vertical hacia la cámara y textura suave para no doblar la
+    niebla del pack.
+- **Parte de contenido (`vulpe_clima`):** añade `polvo_0..2`, `bruma_polvo_0`, `matorral_0..3`, `reguero_0` y
+  `niebla_0` (dibujadas por `tools/generar-texturas-clima.py`, sin reutilizar texturas de Particle Rain ni de Mojang);
+  **hay que reinstalar `vulpe_clima`** en la instancia.
+- **Comprobación y coste medido** (2026-11-19, `vulpe-pruebas`, versión `native-fdc87ae-83d6bd8c2af1`, desierto
+  `(-9872, 72, -2200)` con `/weather thunder`, ventana enfocada, `horizon-ctl bench 4`, RTX 3050 Ti Laptop):
+  - Con efectos de etapa 2 encendidos: **36,44 fps** (CPU 5,22 ms, `tick` 0,75 ms; GPU 18,98 ms).
+  - Con efectos de etapa 2 apagados: **41,37 fps** (CPU 3,80 ms, `tick` 0,57 ms; GPU 17,60 ms).
+  - Diferencia: **−4,9 fps** (+1,42 ms CPU, +1,38 ms GPU; +0,18 ms en `tick`).

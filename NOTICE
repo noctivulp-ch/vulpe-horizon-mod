@@ -20,15 +20,16 @@ Componentes de terceros
 Particle Rain
 -------------
 
-Los efectos de clima con partículas (`engine/src/clima.rs`, `client_tick.rs`; lluvia y nieve en esta etapa) son un
-port a Horizon de Particle Rain, de pigcart: https://github.com/PigCart/particle-rain (rama `main`, commit
-`75443ca`). Se portaron la lógica de nacimiento alrededor de la cámara (`ParticleSpawner`), el viento
-(`ParticleRain.getWind`, `WindManager`), el movimiento, el choque y el desvanecido (`CustomParticle`,
-`WeatherParticle`) y los valores de `particles.json` y `config/ConfigData.java`. El dueño lo conoció como Pretty Rain
-(Leclowndu93150 y PigCart), la versión para Forge de Particle Rain.
+Los efectos de clima con partículas (`engine/src/clima.rs`, `client_tick.rs`) son un port a Horizon de Particle Rain,
+de pigcart: https://github.com/PigCart/particle-rain (rama `main`, commit `75443ca`). Se portaron la lógica de
+nacimiento alrededor de la cámara (`ParticleSpawner`), el viento (`ParticleRain.getWind`, `WindManager`), el
+movimiento, el choque, el rebote y el desvanecido (`CustomParticle`, `WeatherParticle`, `StreakParticle`) y los valores
+de `particles.json` y `config/ConfigData.java`. El dueño lo conoció como Pretty Rain (Leclowndu93150 y PigCart), la
+versión para Forge de Particle Rain.
 
 No se reutilizan texturas ni sonidos de Particle Rain ni de Minecraft: las de `contenido/assets/vulpe/textures/particle/`
-(`lluvia_0..15`, `lluvia_fuerte_0..3`, `nieve_0..15`, `nieve_fuerte_0..3`) las dibuja `tools/generar-texturas-clima.py`.
+(`lluvia_0..15`, `lluvia_fuerte_0..3`, `nieve_0..15`, `nieve_fuerte_0..3`, `polvo_0..2`, `bruma_polvo_0`,
+`matorral_0..3`, `reguero_0`, `niebla_0`) las dibuja `tools/generar-texturas-clima.py`.
 
 Licencia de Particle Rain (MIT), tal cual:
 
