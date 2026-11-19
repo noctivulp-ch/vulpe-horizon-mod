@@ -188,6 +188,7 @@ const RUNTIME_SYNC_INTERVAL: Duration = Duration::from_millis(500);
 struct RuntimeSyncState {
     initialized: bool,
     last_check: Option<Instant>,
+    last_config_dir: Option<PathBuf>,
     last_config_stamp: Option<(u64, Option<SystemTime>)>,
     last_source_stamp: Option<String>,
     last_pack_path: Option<PathBuf>,
@@ -196,10 +197,28 @@ struct RuntimeSyncState {
 static RUNTIME_SYNC: Mutex<RuntimeSyncState> = Mutex::new(RuntimeSyncState {
     initialized: false,
     last_check: None,
+    last_config_dir: None,
     last_config_stamp: None,
     last_source_stamp: None,
     last_pack_path: None,
 });
+
+static LAST_FRAME_SNAPSHOT: Mutex<(Option<i64>, Option<[f64; 3]>)> = Mutex::new((None, None));
+
+/// Guarda el reloj y la cámara observados al principio del fotograma para `Hooks::shader_params`.
+pub fn observe_frame_snapshot(day_time: Option<i64>, camera_pos: Option<[f64; 3]>) {
+    if let Ok(mut lock) = LAST_FRAME_SNAPSHOT.lock() {
+        *lock = (day_time, camera_pos);
+    }
+}
+
+/// Lee el último reloj y cámara observados en el fotograma actual.
+pub fn last_frame_snapshot() -> (Option<i64>, Option<[f64; 3]>) {
+    LAST_FRAME_SNAPSHOT
+        .lock()
+        .map(|lock| *lock)
+        .unwrap_or((None, None))
+}
 
 /// Activa o desactiva la bandera del canal fijo (archivo de constantes WGSL del pack).
 pub fn set_fixed_channel_active(active: bool) {
@@ -357,6 +376,7 @@ pub fn sync_runtime_state(
         let Ok(mut state) = RUNTIME_SYNC.lock() else {
             return;
         };
+        state.last_config_dir = Some(cfg_dir.to_path_buf());
         let pack_changed = state.last_pack_path != pack_buf;
         let time_due = state
             .last_check
@@ -481,6 +501,15 @@ pub fn sync_runtime_state(
         }
         set_fixed_channel_active(false);
     }
+}
+
+/// Procesa `/vulpe` usando las rutas de configuración y pack recordadas por `sync_runtime_state`.
+pub fn execute_client_command_cached(command: &str) -> Option<String> {
+    let (config_dir, pack_path) = RUNTIME_SYNC
+        .lock()
+        .map(|s| (s.last_config_dir.clone(), s.last_pack_path.clone()))
+        .unwrap_or((None, None));
+    execute_client_command(command, config_dir.as_deref(), pack_path.as_deref())
 }
 
 /// Procesa comandos del cliente `/vulpe` (API 35: `native_commands` / `native_command`).

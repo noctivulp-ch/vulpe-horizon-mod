@@ -1,0 +1,9 @@
+[package]
+name = "vulpe"
+version = "0.2.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }
+vulpe-engine = { path = "src/engine" }

@@ -13,7 +13,7 @@ import random
 
 from PIL import Image
 
-RAIZ = pathlib.Path(__file__).resolve().parent.parent / "contenido" / "assets" / "vulpe"
+RAIZ = pathlib.Path(__file__).resolve().parent.parent / "assets" / "vulpe"
 TEX = RAIZ / "textures" / "particle"
 PART = RAIZ / "particles"
 LADO = 32

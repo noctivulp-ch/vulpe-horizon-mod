@@ -20,18 +20,26 @@ da al shader algunos datos del mundo; el mod se los pasa por `frame.mods`.
 
 ## Qué hace hoy
 
-- Pasa al shader el día del mundo, la fase de la luna y la estación del año.
+- Pasa al shader el día del mundo, la fase de la luna, la estación del año y la categoría de bioma en la cámara (formato 2 de `frame.mods`).
 - Pasa la posición y edad del último rayo relativo a la cámara.
-- Lee los ajustes finos del jugador desde un archivo de configuración (`vulpe-horizon.toml`).
-- Pasa hasta 16 ajustes finos en vivo al shader sin recargar.
-- Escribe el archivo de constantes del pack (`constantes_mod.wgsl`) para el ajuste fino fijo mediante la Forma C (`canal_fijo = "c" | "apagado"`): desempaqueta el `.hshader` o copia la carpeta del pack en `shaderpacks/vulpe-mod/`, lo selecciona automáticamente (`horizon:vulpe_mod`) y regenera la copia cuando cambia el original sin tocar el pack del jugador.
+- Lee los ajustes finos del jugador desde un archivo de configuración (`config/vulpe-horizon.toml`).
+- Pasa hasta 16 ajustes finos en vivo al shader sin recargar (`/vulpe vivo`, `/vulpe poner`, `/vulpe estado`).
+- Genera el archivo de constantes del pack (`constantes_mod.wgsl`) mediante la Forma C (`shaderpacks/vulpe-mod/`).
+- Añade clima con partículas (lluvia, nieve, polvo del desierto, matorrales, salpicaduras, humo, regueros y niebla vertical; port de Particle Rain) con sus texturas empaquetadas dentro del mismo `.hmod`.
 
 ## Puesta en marcha
 
-Necesita Horizon con su lanzador. El mod se compila junto al juego:
+Necesita Horizon (`nightly-2026-11-18-dd67b76` o compatible) con su lanzador (0.2.81+). El mod se empaqueta como un único `.hmod` (código + `assets/`) y se compila contra el SDK precompilado del lanzador:
 
 ```bash
-horizon-launcher native-build --trust-native-code <ruta-del-repo>
+tools/empaquetar.sh --instalar                         # genera dist/vulpe.hmod e instala en horizon-native-mods/
+horizon-launcher native-build --trust-native-code      # compila los mods activos de la instancia
+```
+
+También se puede compilar directamente desde la carpeta del repo para pruebas:
+
+```bash
+horizon-launcher native-build --instance <instancia> --trust-native-code <ruta-del-repo>
 ```
 
 Detalle, perfiles de compilación y cómo comprobar que funciona: [`docs/guia.md`](docs/guia.md). Decisiones de

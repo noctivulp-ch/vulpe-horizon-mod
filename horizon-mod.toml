@@ -1,0 +1,14 @@
+id = "vulpe"
+name = "Vulpe para Horizon"
+version = "0.2.0"
+description = "Datos del mundo, ajustes finos por frame.mods y clima con partículas para el shader Vulpe"
+authors = ["noctivulp-ch"]
+license = "GPL-3.0-or-later"
+api = "0.2"
+side = "client"
+capabilities = ["registries"]
+
+[native]
+game = "26.3"
+horizon = "dd67b76ff23e28c6d8e21859df600d31572f81a0"
+mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"

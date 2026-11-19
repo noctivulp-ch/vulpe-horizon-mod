@@ -21,18 +21,19 @@ Licencia: GPL-3.0-or-later ([LICENSE](LICENSE)).
 
 ```
 vulpe-horizon-mod/
-  ├── horizon-mixin.toml     # Manifiesto del bundle para horizon-mixins (id = "vulpe")
-  ├── shader_params.rs       # Helper privado inyectado en native_shader_params
-  ├── lightning_strike.rs    # Helper privado inyectado en native_lightning_strike
-  ├── commands.rs            # Helper privado inyectado en native_commands (API 35)
-  ├── command.rs             # Helper privado inyectado en native_command (API 35)
-  ├── frame.rs               # Helper privado inyectado en native_frame (selección de pack en Forma C)
-  ├── engine/                # Crate propio del mod (miembro del workspace de Horizon)
-  │   ├── Cargo.toml         # Paquete vulpe-engine (edición 2024, sin dependencias externas)
-  │   └── src/               # Motor de formato v1, tabla, configuración, constantes y pruebas
+  ├── horizon-mod.toml        # Manifiesto único del .hmod (id = "vulpe", api = "0.2", [native])
+  ├── Cargo.toml              # Crate raíz del mod (`vulpe`, depende de `horizon-mod-api` y `vulpe-engine`)
+  ├── assets/vulpe/           # Texturas y juegos de sprites del clima con partículas
+  ├── src/
+  │   ├── lib.rs              # `impl mod_api::Hooks` (comandos, rayo, fotograma, shader_params, tick)
+  │   ├── clima_mod.rs        # Proveedores y generador de partículas del clima sobre `mod_api`
+  │   └── engine/             # Crate puro `vulpe-engine` (formato 2, tabla, TOML, constantes, clima y pruebas)
+  ├── tools/
+  │   ├── empaquetar.sh       # Empaqueta `dist/vulpe.hmod` y opcionalmente lo instala con `--instalar`
+  │   └── generar-texturas-clima.py
   ├── docs/
-  │   ├── decisiones.md      # Registro detallado de decisiones de diseño
-  │   └── guia.md            # Guía técnica y de verificación
+  │   ├── decisiones.md       # Registro detallado de decisiones de diseño
+  │   └── guia.md             # Guía técnica y de verificación
   └── README.md
 ```
 
@@ -42,50 +43,37 @@ Las decisiones técnicas y el diseño detallado se encuentran explicados en [doc
 
 ## Cómo compilar e instalar
 
-La compilación se realiza a través de `horizon-launcher` fijado al commit de la versión instalada (`nightly-2026-11-08-fdc87ae`):
+La compilación se realiza contra el SDK precompilado de Horizon (`nightly-2026-11-18-dd67b76`, lanzador 0.2.81+):
 
-### 1. Pruebas unitarias del crate
-Se pueden ejecutar las pruebas del motor de cálculo directamente con Cargo:
+### 1. Pruebas unitarias de la lógica pura
+Se ejecutan sin necesidad de SDK ni conexión:
 ```bash
-cd engine
-cargo test
+cargo test --manifest-path src/engine/Cargo.toml
 ```
 
-### 2. Compilación del mod nativo con Horizon Launcher
-```bash
-horizon-launcher native-build \
-  --trust-native-code \
-  <ruta-del-repo>
-```
-
-Opcionalmente, se puede especificar el perfil de compilación:
-- `--profile performance` (por defecto): compilación incremental optimizada para jugar.
-- `--profile dev`: iteración más rápida de desarrollo.
-- `--profile release`: optimización máxima con LTO delgado.
-
-### 3. Dónde queda el artefacto
-`horizon-launcher native-build` compila el juego con el mod integrado en el directorio de datos del lanzador:
-- **Caché y artefactos de compilación:** `<datos-del-lanzador>/native/target/`
-- **Juego instalado para la instancia:** `<datos-del-lanzador>/versions/native-<id>/`
-- La instancia seleccionada queda automáticamente configurada para jugar esta versión construida.
-
----
-
-### 4. Instalarlo en la instancia
-
-`native-build <carpeta>` compila **solo** los mods de esa carpeta: la versión que resulta deja fuera los demás mods
-nativos de la instancia (por ejemplo, el contador de FPS del registro). Para que el mod conviva con ellos y se quede
-instalado, se empaqueta como `.hnmod` y se deja en la carpeta de mods nativos de la instancia:
+### 2. Empaquetar e instalar en una instancia (`.hmod` único)
+El código nativo y las texturas de clima (`assets/vulpe/`) viajan juntos en **un solo archivo `dist/vulpe.hmod`**:
 
 ```bash
-tools/empaquetar-hnmod.sh --instalar            # dist/vulpe.hnmod → <instancia>/horizon-native-mods/, y mod.vulpe:true
-horizon-launcher native-build --instance horizon --trust-native-code   # sin carpeta: todos los mods activos
+tools/empaquetar.sh --instalar [CARPETA_DE_LA_INSTANCIA]
+horizon-launcher native-build --instance <instancia> --version nightly-2026-11-18-dd67b76 --trust-native-code
 ```
 
-El `.hnmod` lleva solo lo que acepta el lanzador: `horizon-native.json` y, bajo `mixins/vulpe/`, los `.rs`, los `.toml`
-y los textos de crate (`README`, `LICENSE`, `NOTICE`). Cualquier otro archivo (los `.md` de `docs/`) hace que lo rechace.
-El script toma de `git ls-files`, así que lo que no esté versionado no entra. Tras cada cambio del mod se repiten los
-dos pasos.
+- Sin argumentos de carpeta en `--instalar`, usa `~/.local/share/horizon`.
+- Copia `dist/vulpe.hmod` en `<instancia>/horizon-native-mods/vulpe.hmod` y activa `mod.vulpe:true` en `<instancia>/horizon-mods.txt`.
+- Para compilar directamente desde la carpeta del repo en una instancia de pruebas:
+  ```bash
+  horizon-launcher native-build --instance vulpe-pruebas --version nightly-2026-11-18-dd67b76 --trust-native-code <ruta-del-repo>
+  ```
+
+### 3. Cómo desinstalar el formato viejo (`.hnmod` + `vulpe_clima`)
+Antes de compilar la versión nueva en una instancia que tuviera instalado el formato antiguo:
+1. Borra `<instancia>/horizon-native-mods/vulpe.hnmod` (si existe).
+2. Borra `<instancia>/horizon-mods/vulpe_clima/` (y `vulpe_clima.hmod` si existe): ya no hace falta porque `assets/vulpe/` va dentro de `vulpe.hmod`.
+3. Elimina la línea `mod.vulpe_clima:true` de `<instancia>/horizon-mods.txt`.
+
+### 4. Dónde queda el artefacto
+`horizon-launcher native-build` compila el mod contra el SDK precompilado (sin recompilar el juego) y deja la versión instalada en `<datos-del-lanzador>/versions/native-<commit>-<clave>/`, seleccionada para esa instancia.
 
 ## Cómo comprobar `frame.mods` en el juego
 

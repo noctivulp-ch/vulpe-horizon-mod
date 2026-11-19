@@ -219,3 +219,48 @@ Especificación: `vulpe-horizon-spec/subsistemas/26-clima-de-particle-rain.md` y
   - Con efectos de etapa 2 encendidos: **36,44 fps** (CPU 5,22 ms, `tick` 0,75 ms; GPU 18,98 ms).
   - Con efectos de etapa 2 apagados: **41,37 fps** (CPU 3,80 ms, `tick` 0,57 ms; GPU 17,60 ms).
   - Diferencia: **−4,9 fps** (+1,42 ms CPU, +1,38 ms GPU; +0,18 ms en `tick`).
+
+## 9. Migración al formato `.hmod` nuevo y a `mod_api::Hooks` puro (N-03, 2026-11-19)
+
+Con la actualización a Horizon `nightly-2026-11-18-dd67b76` (`dd67b76ff23e28c6d8e21859df600d31572f81a0`) y el lanzador
+0.2.81, el formato antiguo (`horizon-mixin.toml` + `horizon-native.json` + `.hnmod` + mod de contenido aparte
+`vulpe_clima`) dejó de aceptarse.
+
+- **Paquete único `.hmod`:** `horizon-mod.toml` en la raíz (`id = "vulpe"`, `api = "0.2"`, `side = "client"`,
+  `capabilities = ["registries"]`, sección `[native]` con `game = "26.3"`, `horizon = "dd67b76..."`,
+  `mixins = "e59da909..."`), `Cargo.toml` y `src/` en la raíz, `src/engine/` como crate puro local (para poder correr
+  `cargo test` sin SDK y cumplir la regla de paquete de `.rs`/`.toml` bajo `src/`), y `assets/vulpe/` directamente en la
+  raíz del mismo `.hmod` (desaparece el mod aparte `vulpe_clima`).
+- **Por qué se migró de `[[native.mixin]]` a `mod_api::Hooks` puro (0 mixins):**
+  1. En `dd67b76`, el generador de `horizon_patched` del lanzador copia `use self::api_values::TryIntoApi;` al espejar
+     `horizon_client::game`, pero `api_values::TryIntoApi` es `pub(crate)` en `horizon_client`, por lo que cualquier
+     `[[native.mixin]]` sobre cualquier función dentro de `horizon_client::game::*` falla al compilar `horizon_patched`
+     con `E0603`.
+  2. Al mismo tiempo, `dd67b76` ya publica en `mod_api::Hooks` y `ClientHost` todos los puntos que antes requerían
+     mixins: `register`, `register_particle_providers` (`ParticleProvider` + `ModParticle`), `register_client_commands`,
+     `command`, `lightning_strike`, `render_frame_pre`, `shader_params` y `client_tick_post` (con `host.clock()`,
+     `host.camera()`, `host.instance_dir()`, `host.client_surface_heights()`, `level.weather()`, `level.client_biome()`,
+     `level.biome_properties()`, `level.block()` y `host.add_particle()`).
+  3. Resultado: compilación en ~1 s contra el SDK precompilado y compatibilidad automática entre nightlies vía
+     `surface.json`.
+- **Diferencias / límites frente al formato anterior:**
+  - **Cambio automático en caliente del pack (Forma C):** `mod_api` no expone `native_shaders.select(...)`. El mod
+    sigue leyendo `pickedShaderPack` de `horizon-graphics.txt`, desempaquetando/copiando el pack en
+    `shaderpacks/vulpe-mod/` y escribiendo `constantes_mod.wgsl`, pero el cambio de pack activo en el cliente no se
+    aplica en caliente sin seleccionarlo en el menú.
+  - **Rayos en servidores remotos:** `Hooks::lightning_strike` es un gancho de servidor (funciona en un jugador y LAN
+    como servidor integrado), pero `ClientHost` no expone `game.bolts` para rayos visuales recibidos en servidores
+    remotos.
+  - **Colisión lateral de partículas en `ParticleProvider::tick`:** `ModParticle` no tiene acceso al mundo en `tick`; el
+    choque/rebote contra el suelo usa la altura `MotionBlocking` capturada al nacer en `particle.state[0]` (suficiente
+    para lluvia, nieve, polvo, matorrales y regueros; no hay detección de paredes laterales ni fluidos a mitad de vuelo,
+    ni goteo `DrippingWater` al final de un reguero).
+- **Comprobado en `vulpe-pruebas`** (`native-dd67b76-f15aa928f096`):
+  - `tools/empaquetar.sh --instalar` produce `dist/vulpe.hmod` (73 archivos), que carga código y `assets/vulpe/` en un
+    solo paquete sin avisos.
+  - `/vulpe estado` (`mods[0]=(1002, 1, 5, 0)`), `/weather thunder` + `/summon lightning_bolt` (`mods[0]=(1002, 1, 7, 0)`,
+    `rayo=activo`), `/vulpe vivo cielo_brillo_manual 2.5` (`mods[0]=(1002, 1, 7, 1)`), `/vulpe restablecer` y lluvia de
+    partículas con `/weather rain` comprobados en juego.
+  - **Aviso sobre el pack de shaders:** Horizon `dd67b76` exige `api = "0.2"` en `horizon-shaders.toml` y rechazó
+    `vulpe-horizon/build/vulpe` (`needs shader API 0.1; this Horizon serves 0.2`), por lo que la lectura de `frame.mods`
+    dentro del shader queda pendiente de migrar el pack a shader API 0.2.
