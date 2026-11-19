@@ -9,6 +9,7 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
         tamano_base: f32,
         distancia_max: f32,
         rebotes_borde: u8,
+        giro: f32,
     }
 
     impl horizon_client::particles::ParticleController for VulpeParticula {
@@ -108,7 +109,18 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
                 d.opacidad,
                 cl::lluvia(),
             );
-            Default::default()
+            let frame = if self.efecto == cl::Efecto::Matorral {
+                let rapidez = (p.velocity[0] * p.velocity[0] + p.velocity[1] * p.velocity[1] + p.velocity[2] * p.velocity[2])
+                    .sqrt() as f32;
+                self.giro += rapidez;
+                Some(((self.giro * 2.0) as usize) % d.num_sprites)
+            } else {
+                None
+            };
+            horizon_client::particles::ParticleUpdate {
+                frame,
+                ..Default::default()
+            }
         }
     }
 
@@ -124,7 +136,7 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
     };
     let lluvia_nieve_activas = cfg.lluvia && cfg.nieve;
     cl::set_particulas_activas(lluvia_nieve_activas);
-    let hay_alguno = lluvia_nieve_activas || cfg.polvo || cfg.polvo_raso || cfg.bruma_polvo;
+    let hay_alguno = lluvia_nieve_activas || cfg.polvo || cfg.polvo_raso || cfg.bruma_polvo || cfg.matorral;
     // La cámara del fotograma, o la vista del juego si el gancho no la da (igual que shader_params.rs).
     let camara = game.native_camera().map(|c| c.position).unwrap_or(game.view.position);
     let (lluvia, trueno) = game.weather_levels(1.0);
@@ -201,6 +213,7 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
                 tamano_base: d.tamano,
                 distancia_max: cfg.distancia,
                 rebotes_borde: 0,
+                giro: 0.0,
             };
             let Some(mut p) = particulas.controlled(d.sprites, pos, d.translucida, ctrl) else {
                 sin_sprite += 1;
@@ -232,9 +245,9 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
     }
     cl::contar_tick(creadas_cielo);
 
-    // 2) Efectos de superficie (`tickSurfaceFX`): bruma de polvo (`dust_haze`).
+    // 2) Efectos de superficie (`tickSurfaceFX`): bruma de polvo (`dust_haze`) y matorrales (`shrub`).
     let mut creadas_sup = 0u32;
-    if cfg.bruma_polvo && cl::vivas() < u64::from(cfg.tope) {
+    if (cfg.bruma_polvo || cfg.matorral) && cl::vivas() < u64::from(cfg.tope) {
         let n_sup = cl::densidad_superficie(&cfg, trueno, cl::inactivo_superficie());
         let alcance = cfg.alcance_superficie.min(cl::MAX_DISTANCIA_CONTROLADA);
         for _ in 0..n_sup {
@@ -283,6 +296,7 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
                     tamano_base: d.tamano,
                     distancia_max: alcance,
                     rebotes_borde: 0,
+                    giro: 0.0,
                 };
                 let Some(mut p) = particulas.controlled(d.sprites, pos, d.translucida, ctrl) else {
                     sin_sprite += 1;
@@ -298,7 +312,11 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
                 );
                 p.lifetime = d.vida;
                 p.size = cl::tamano_por_distancia(d.tamano, dist, d.escala_distancia);
-                let tinte = cl::tinte_bloque_arena(nombre_bloque, azar.siguiente());
+                let tinte = match d.tinte {
+                    cl::Tinte::Mapa => cl::tinte_bloque_arena(nombre_bloque, azar.siguiente()),
+                    cl::Tinte::Agua => cl::tinte_agua(),
+                    cl::Tinte::Ninguno => [1.0, 1.0, 1.0],
+                };
                 p.rgba = [tinte[0], tinte[1], tinte[2], 0.0];
                 particulas.push(p);
                 cl::nace();
@@ -354,6 +372,7 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
                     tamano_base: d.tamano,
                     distancia_max: cfg.distancia,
                     rebotes_borde: 0,
+                    giro: 0.0,
                 };
                 let Some(mut p) = particulas.controlled(d.sprites, pos, d.translucida, ctrl) else {
                     sin_sprite += 1;

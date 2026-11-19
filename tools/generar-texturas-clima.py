@@ -73,6 +73,44 @@ def bruma_polvo(img, rnd):
                 img.putpixel((x, y), (242, 240, 235, a))
 
 
+def matorral(img, _rnd):
+    """Un matorral seco con ramas en tono madera/arena oscura; luego se gira en 4 fotogramas."""
+    # Ramas simples desde el centro hacia fuera (sin copiar dead_bush de Mojang).
+    ramas = [
+        [(16, 26), (16, 18), (11, 12), (8, 7)],
+        [(16, 22), (21, 15), (25, 10)],
+        [(16, 18), (17, 10), (15, 5)],
+        [(12, 14), (7, 15), (5, 12)],
+        [(20, 16), (25, 17), (27, 14)],
+        [(16, 20), (10, 21), (7, 23)],
+        [(16, 20), (22, 22), (25, 24)],
+        [(14, 10), (19, 7)],
+    ]
+    paleta = [(118, 84, 48, 255), (138, 100, 58, 255), (96, 68, 38, 255)]
+    for idx, pts in enumerate(ramas):
+        col = paleta[idx % len(paleta)]
+        for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+            pasos = max(abs(x1 - x0), abs(y1 - y0), 1)
+            for s in range(pasos + 1):
+                x = round(x0 + (x1 - x0) * s / pasos)
+                y = round(y0 + (y1 - y0) * s / pasos)
+                if 0 <= x < LADO and 0 <= y < LADO:
+                    img.putpixel((x, y), col)
+
+
+def juego_girado(nombre, dibujar, rnd):
+    """Genera 4 fotogramas girados 0/90/180/270° para simular giro en Horizon."""
+    base = Image.new("RGBA", (LADO, LADO), (0, 0, 0, 0))
+    dibujar(base, rnd)
+    texturas = []
+    for i in range(4):
+        rot = base.rotate(-90 * i)
+        archivo = f"{nombre}_{i}"
+        rot.save(TEX / f"{archivo}.png")
+        texturas.append(f"vulpe:{archivo}")
+    (PART / f"{nombre}.json").write_text(json.dumps({"textures": texturas}, indent=2) + "\n")
+
+
 def juego(nombre, cuantas, dibujar, por_sprite, rnd):
     texturas = []
     for i in range(cuantas):
@@ -95,6 +133,7 @@ def main():
     juego("nieve_fuerte", 4, copo, 4, rnd)
     juego("polvo", 3, polvo, 1, rnd)
     juego("bruma_polvo", 1, bruma_polvo, 1, rnd)
+    juego_girado("matorral", matorral, rnd)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,8 @@ pub struct ClimaConfig {
     pub polvo_raso: bool,
     /// Bruma de arena que pasa junto a la cámara (`dust_haze`).
     pub bruma_polvo: bool,
+    /// Matorrales secos que ruedan por el desierto (`shrub`).
+    pub matorral: bool,
     /// Multiplicador de la densidad de todos los efectos.
     pub densidad: f32,
     /// Tope de partículas vivas (`perf.particleAmount`).
@@ -47,6 +49,7 @@ impl Default for ClimaConfig {
             polvo: true,
             polvo_raso: true,
             bruma_polvo: true,
+            matorral: true,
             densidad: 1.0,
             tope: 1500,
             densidad_tormenta: 1.5,
@@ -84,6 +87,7 @@ impl ClimaConfig {
                 "polvo" => c.polvo = b,
                 "polvo_raso" => c.polvo_raso = b,
                 "bruma_polvo" => c.bruma_polvo = b,
+                "matorral" => c.matorral = b,
                 "densidad" => c.densidad = f.unwrap_or(c.densidad).clamp(0.0, 4.0),
                 "tope" => c.tope = f.map(|x| x.clamp(0.0, 20000.0) as u32).unwrap_or(c.tope),
                 "densidad_tormenta" => c.densidad_tormenta = f.unwrap_or(c.densidad_tormenta).clamp(0.0, 4.0),
@@ -103,13 +107,13 @@ impl ClimaConfig {
     pub fn to_toml_section(&self) -> String {
         format!(
             "\n[clima]\n# Lluvia y nieve como partículas del mod (sustituyen a las del pack)\nlluvia = {}\nnieve = {}\n\
-             # Polvo de arena en desiertos y mesas con lluvia/tormenta\npolvo = {}\npolvo_raso = {}\nbruma_polvo = {}\n\
+             # Polvo de arena y matorrales rodantes en desiertos y mesas con lluvia/tormenta\npolvo = {}\npolvo_raso = {}\nbruma_polvo = {}\nmatorral = {}\n\
              # Densidad relativa (0 .. 4)\ndensidad = {:.2}\n# Tope de partículas vivas\ntope = {}\n\
              # Densidad con tormenta\ndensidad_tormenta = {:.2}\n# Radio donde nacen, bloques (4 .. 32)\ndistancia = {:.1}\n\
              # Alcance de efectos de superficie, bloques (8 .. 100; Horizon acota a 32)\nalcance_superficie = {:.1}\n\
              # Viento: fuerza, ráfagas, modulación y más viento con la altura\nviento_fuerza = {:.3}\nviento_rafagas = {:.3}\n\
              viento_modulacion = {:.3}\nviento_altura = {}\n",
-            self.lluvia, self.nieve, self.polvo, self.polvo_raso, self.bruma_polvo,
+            self.lluvia, self.nieve, self.polvo, self.polvo_raso, self.bruma_polvo, self.matorral,
             self.densidad, self.tope, self.densidad_tormenta, self.distancia, self.alcance_superficie,
             self.viento_fuerza, self.viento_rafagas, self.viento_modulacion, self.viento_altura
         )
@@ -158,6 +162,7 @@ pub enum Efecto {
     Polvo,
     PolvoRaso,
     BrumaPolvo,
+    Matorral,
 }
 
 /// Datos de un efecto (`ParticleData`).
@@ -193,7 +198,7 @@ impl Efecto {
         Efecto::NieveFuerte,
         Efecto::Polvo,
     ];
-    pub const SUPERFICIE: [Efecto; 1] = [Efecto::BrumaPolvo];
+    pub const SUPERFICIE: [Efecto; 2] = [Efecto::BrumaPolvo, Efecto::Matorral];
     pub const ARRIBA_BLOQUE: [Efecto; 1] = [Efecto::PolvoRaso];
 
     pub fn datos(self) -> DatosEfecto {
@@ -247,6 +252,13 @@ impl Efecto {
                 tamano: 0.4, escala_distancia: 1.0, opacidad: 0.4, desvanecido: Desvanecido::Distancia,
                 tinte: Tinte::Mapa, translucida: true, vida: 100,
             },
+            Efecto::Matorral => DatosEfecto {
+                sprites: "vulpe:matorral", num_sprites: 4, origen: Origen::Superficie,
+                precipitacion: Precipitacion::Ninguna, solo_tormenta: false, solo_overworld: true,
+                densidad: 0.01, gravedad: 0.5, viento: 0.4, viento_tormenta: 0.5, rebote: 0.15,
+                tamano: 0.55, escala_distancia: 0.0, opacidad: 1.0, desvanecido: Desvanecido::Distancia,
+                tinte: Tinte::Ninguno, translucida: false, vida: 3000,
+            },
         }
     }
 
@@ -258,6 +270,7 @@ impl Efecto {
             Efecto::Polvo => c.polvo,
             Efecto::PolvoRaso => c.polvo_raso,
             Efecto::BrumaPolvo => c.bruma_polvo,
+            Efecto::Matorral => c.matorral,
         }
     }
 }
