@@ -14,6 +14,13 @@ use std::time::Instant;
 /// Duración del secado completo de las gotas tras parar la lluvia (segundos, spec 27 §1).
 pub const LLUVIA_SECADO_S: f32 = 30.0;
 
+/// Umbral de temperatura de nieve en Minecraft (biomas fríos o altura con nieve, spec 27 §2).
+pub const TEMP_UMBRAL_NIEVE: f32 = 0.15;
+
+/// Tiempos de crecimiento y retirada gradual de la escarcha (segundos, spec 27 §2).
+pub const ESCARCHA_CRECE_S: f32 = 16.0;
+pub const ESCARCHA_RETIRA_S: f32 = 24.0;
+
 /// Paso máximo de tiempo entre observaciones para no saltar temporizadores tras una pausa.
 const MAX_DT_S: f32 = 1.0;
 
@@ -183,23 +190,48 @@ pub fn limpiar() {
     }
 }
 
-/// Observa el clima de lluvia y el viento para actualizar el estado de mojado y secado (parte 1).
+/// Calcula el objetivo de escarcha `[0, 1]` a partir de la temperatura efectiva (con altura),
+/// si es de noche (`noche` en `0..1`) y si está nevando (`nieve` en `0..1`).
+pub fn objetivo_escarcha(temp_efectiva: f32, noche: f32, nieve: f32) -> f32 {
+    if temp_efectiva >= TEMP_UMBRAL_NIEVE {
+        return 0.0;
+    }
+    let frio = ((TEMP_UMBRAL_NIEVE - temp_efectiva) / 0.45).clamp(0.0, 1.0);
+    let base = 0.48 + 0.32 * frio;
+    (base + 0.22 * noche.clamp(0.0, 1.0) + 0.25 * nieve.clamp(0.0, 1.0)).clamp(0.0, 1.0)
+}
+
+/// Observa el clima de lluvia, escarcha en el frío y viento (partes 1 y 2).
+pub fn observar_lluvia_y_frio(
+    fuerza_lluvia: f32,
+    fuerza_trueno: f32,
+    llueve_en_bioma: bool,
+    temp_efectiva: f32,
+    noche: f32,
+    viento_xz: [f32; 2],
+) {
+    observar_lluvia_y_frio_en(
+        fuerza_lluvia,
+        fuerza_trueno,
+        llueve_en_bioma,
+        temp_efectiva,
+        noche,
+        viento_xz,
+        Instant::now(),
+    );
+}
+
+/// Conserva compatibilidad directa con la firma de parte 1.
 pub fn observar_lluvia(
     fuerza_lluvia: f32,
     fuerza_trueno: f32,
     llueve_en_bioma: bool,
     viento_xz: [f32; 2],
 ) {
-    observar_lluvia_en(
-        fuerza_lluvia,
-        fuerza_trueno,
-        llueve_en_bioma,
-        viento_xz,
-        Instant::now(),
-    );
+    observar_lluvia_y_frio(fuerza_lluvia, fuerza_trueno, llueve_en_bioma, 0.8, 0.0, viento_xz);
 }
 
-/// Variante determinista con marca de tiempo explícita para pruebas unitarias.
+/// Variante determinista de parte 1 para pruebas unitarias.
 pub fn observar_lluvia_en(
     fuerza_lluvia: f32,
     fuerza_trueno: f32,
@@ -207,19 +239,39 @@ pub fn observar_lluvia_en(
     viento_xz: [f32; 2],
     ahora: Instant,
 ) {
+    observar_lluvia_y_frio_en(fuerza_lluvia, fuerza_trueno, llueve_en_bioma, 0.8, 0.0, viento_xz, ahora);
+}
+
+/// Variante determinista con marca de tiempo explícita para pruebas unitarias (partes 1 y 2).
+pub fn observar_lluvia_y_frio_en(
+    fuerza_lluvia: f32,
+    fuerza_trueno: f32,
+    llueve_en_bioma: bool,
+    temp_efectiva: f32,
+    noche: f32,
+    viento_xz: [f32; 2],
+    ahora: Instant,
+) {
     let Ok(mut lock) = ESTADO.lock() else { return };
+    let es_nuevo = lock.is_none();
+    let lluvia = fuerza_lluvia.clamp(0.0, 1.0);
+    let trueno = fuerza_trueno.clamp(0.0, 1.0);
+    let frio = temp_efectiva < TEMP_UMBRAL_NIEVE;
+    let nevando = if frio { lluvia } else { 0.0 };
+    let obj_escarcha = objetivo_escarcha(temp_efectiva, noche, nevando);
+
     let mut st = lock.unwrap_or(EstadoCristales {
         lluvia_pico: 0.0,
         lluvia_secado_s: LLUVIA_SECADO_S,
         viento_xz: [0.0, 0.0],
-        escarcha: 0.0,
+        escarcha: if es_nuevo { obj_escarcha * 0.7 } else { 0.0 },
         copos: 0.0,
         monton: 0.0,
         arena: 0.0,
         arena_roja: false,
         espectador: false,
         bioma_seco: false,
-        bioma_frio: false,
+        bioma_frio: frio,
         vaho_peso: 0.0,
         vaho_pos_mundo: [0.0; 3],
         tiene_vaho_pos: false,
@@ -232,8 +284,6 @@ pub fn observar_lluvia_en(
         .min(MAX_DT_S);
     st.ultimo = ahora;
 
-    let lluvia = fuerza_lluvia.clamp(0.0, 1.0);
-    let trueno = fuerza_trueno.clamp(0.0, 1.0);
     let activa = llueve_en_bioma && lluvia > 0.01;
     if activa {
         // Conserva el pico de intensidad (con refuerzo de tormenta) para el secado escalonado.
@@ -245,6 +295,15 @@ pub fn observar_lluvia_en(
         if st.lluvia_secado_s >= LLUVIA_SECADO_S {
             st.lluvia_pico = 0.0;
         }
+    }
+
+    // Escarcha en el frío: crece más rápido mientras nieva y se retira despacio al calentarse.
+    st.bioma_frio = frio;
+    if st.escarcha < obj_escarcha {
+        let ritmo = if nevando > 0.01 { ESCARCHA_CRECE_S * 0.55 } else { ESCARCHA_CRECE_S };
+        st.escarcha = (st.escarcha + dt / ritmo).min(obj_escarcha);
+    } else if st.escarcha > obj_escarcha {
+        st.escarcha = (st.escarcha - dt / ESCARCHA_RETIRA_S).max(obj_escarcha);
     }
 
     // Normaliza/acota el viento de 26 a [-1, 1] conservando su dirección.
@@ -337,10 +396,11 @@ pub fn resumen_estado() -> String {
         return "n/d".to_string();
     };
     format!(
-        "lluvia={}({:.2}/sec={:.1}s) nieve={} arena={} aliento={}",
+        "lluvia={}({:.2}/sec={:.1}s) escarcha={:.2} nieve={} arena={} aliento={}",
         cfg.lluvia.as_str(),
         st.lluvia_pico,
         st.lluvia_secado_s,
+        st.escarcha,
         cfg.nieve.as_str(),
         cfg.arena.as_str(),
         if cfg.aliento { "sí" } else { "no" },
@@ -424,5 +484,44 @@ mod tests {
         assert_eq!(tu & 255, 255);
         assert_eq!((tu >> 8) & 255, 128);
         assert_eq!((tu >> 16) & 255, 64);
+    }
+
+    #[test]
+    fn test_escarcha_crece_en_frio_y_se_retira_al_calentar() {
+        let _g = test_lock();
+        limpiar();
+        set_config(CristalesConfig::default());
+        let t0 = Instant::now();
+
+        // Bioma nevado de noche: crece más que de día
+        assert!(objetivo_escarcha(-0.5, 1.0, 0.0) > objetivo_escarcha(-0.5, 0.0, 0.0));
+        assert!(objetivo_escarcha(0.0, 0.0, 1.0) > objetivo_escarcha(0.0, 0.0, 0.0));
+        assert_eq!(objetivo_escarcha(0.8, 1.0, 0.0), 0.0);
+
+        observar_lluvia_y_frio_en(0.0, 0.0, false, -0.5, 1.0, [0.0, 0.0], t0);
+        let mut t = t0;
+        for _ in 0..10 {
+            t += Duration::from_secs(1);
+            observar_lluvia_y_frio_en(1.0, 0.0, false, -0.5, 1.0, [0.0, 0.0], t);
+        }
+        let (m6, _) = shader_params(None).unwrap();
+        let esc_frio = ((m6[1] as u32) & 255) as f32 / 255.0;
+        assert!(esc_frio > 0.9, "escarcha llena en nevada nocturna: {esc_frio}");
+
+        // Al calentarse (bioma templado), se retira gradualmente (no de golpe)
+        t += Duration::from_secs(1);
+        observar_lluvia_y_frio_en(0.0, 0.0, true, 0.8, 0.0, [0.0, 0.0], t);
+        let (m6, _) = shader_params(None).unwrap();
+        let esc_tras_1s = ((m6[1] as u32) & 255) as f32 / 255.0;
+        assert!(esc_tras_1s > 0.8 && esc_tras_1s < esc_frio);
+
+        for _ in 0..30 {
+            t += Duration::from_secs(1);
+            observar_lluvia_y_frio_en(0.0, 0.0, true, 0.8, 0.0, [0.0, 0.0], t);
+        }
+        let (m6, _) = shader_params(None).unwrap();
+        let esc_fin = ((m6[1] as u32) & 255) as f32 / 255.0;
+        assert!(esc_fin < 0.01);
+        limpiar();
     }
 }
