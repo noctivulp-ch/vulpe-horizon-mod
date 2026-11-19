@@ -23,6 +23,10 @@ pub struct ClimaConfig {
     pub bruma_polvo: bool,
     /// Matorrales secos que ruedan por el desierto (`shrub`).
     pub matorral: bool,
+    /// Salpicaduras de lluvia con viento sobre bloques (`splatter`).
+    pub salpicadura: bool,
+    /// Humo de lluvia sobre lava, magma y bloques calientes (`smoke`).
+    pub humo: bool,
     /// Multiplicador de la densidad de todos los efectos.
     pub densidad: f32,
     /// Tope de partículas vivas (`perf.particleAmount`).
@@ -50,6 +54,8 @@ impl Default for ClimaConfig {
             polvo_raso: true,
             bruma_polvo: true,
             matorral: true,
+            salpicadura: true,
+            humo: true,
             densidad: 1.0,
             tope: 1500,
             densidad_tormenta: 1.5,
@@ -88,6 +94,8 @@ impl ClimaConfig {
                 "polvo_raso" => c.polvo_raso = b,
                 "bruma_polvo" => c.bruma_polvo = b,
                 "matorral" => c.matorral = b,
+                "salpicadura" => c.salpicadura = b,
+                "humo" => c.humo = b,
                 "densidad" => c.densidad = f.unwrap_or(c.densidad).clamp(0.0, 4.0),
                 "tope" => c.tope = f.map(|x| x.clamp(0.0, 20000.0) as u32).unwrap_or(c.tope),
                 "densidad_tormenta" => c.densidad_tormenta = f.unwrap_or(c.densidad_tormenta).clamp(0.0, 4.0),
@@ -108,12 +116,14 @@ impl ClimaConfig {
         format!(
             "\n[clima]\n# Lluvia y nieve como partículas del mod (sustituyen a las del pack)\nlluvia = {}\nnieve = {}\n\
              # Polvo de arena y matorrales rodantes en desiertos y mesas con lluvia/tormenta\npolvo = {}\npolvo_raso = {}\nbruma_polvo = {}\nmatorral = {}\n\
+             # Lava y calor: salpicaduras y humo con lluvia\nsalpicadura = {}\nhumo = {}\n\
              # Densidad relativa (0 .. 4)\ndensidad = {:.2}\n# Tope de partículas vivas\ntope = {}\n\
              # Densidad con tormenta\ndensidad_tormenta = {:.2}\n# Radio donde nacen, bloques (4 .. 32)\ndistancia = {:.1}\n\
              # Alcance de efectos de superficie, bloques (8 .. 100; Horizon acota a 32)\nalcance_superficie = {:.1}\n\
              # Viento: fuerza, ráfagas, modulación y más viento con la altura\nviento_fuerza = {:.3}\nviento_rafagas = {:.3}\n\
              viento_modulacion = {:.3}\nviento_altura = {}\n",
             self.lluvia, self.nieve, self.polvo, self.polvo_raso, self.bruma_polvo, self.matorral,
+            self.salpicadura, self.humo,
             self.densidad, self.tope, self.densidad_tormenta, self.distancia, self.alcance_superficie,
             self.viento_fuerza, self.viento_rafagas, self.viento_modulacion, self.viento_altura
         )
@@ -304,6 +314,18 @@ pub fn tinte_bloque_arena(nombre: &str, u: f32) -> [f32; 3] {
     };
     let var = 0.8 + 0.2 * u.clamp(0.0, 1.0);
     [base[0] * var, base[1] * var, base[2] * var]
+}
+
+/// Si el bloque es caliente para `smoke` (`#minecraft:strider_warm_blocks`, `#minecraft:infiniburn_overworld`).
+pub fn es_bloque_caliente(nombre: &str, es_lava: bool) -> bool {
+    if es_lava {
+        return true;
+    }
+    let n = nombre.rsplit(':').next().unwrap_or(nombre);
+    matches!(
+        n,
+        "lava" | "magma_block" | "netherrack" | "fire" | "soul_fire" | "campfire" | "soul_campfire"
+    )
 }
 
 /// Si el bioma pertenece al Overworld (`#c:in_overworld`).
@@ -677,6 +699,10 @@ mod tests {
         assert!(es_overworld("minecraft:desert"));
         assert!(!es_overworld("minecraft:nether_wastes"));
         assert!(!es_overworld("minecraft:the_end"));
+        assert!(es_bloque_caliente("minecraft:lava", true));
+        assert!(es_bloque_caliente("minecraft:magma_block", false));
+        assert!(es_bloque_caliente("minecraft:fire", false));
+        assert!(!es_bloque_caliente("minecraft:stone", false));
     }
 
     #[test]

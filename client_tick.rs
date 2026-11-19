@@ -136,7 +136,13 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
     };
     let lluvia_nieve_activas = cfg.lluvia && cfg.nieve;
     cl::set_particulas_activas(lluvia_nieve_activas);
-    let hay_alguno = lluvia_nieve_activas || cfg.polvo || cfg.polvo_raso || cfg.bruma_polvo || cfg.matorral;
+    let hay_alguno = lluvia_nieve_activas
+        || cfg.polvo
+        || cfg.polvo_raso
+        || cfg.bruma_polvo
+        || cfg.matorral
+        || cfg.salpicadura
+        || cfg.humo;
     // La cámara del fotograma, o la vista del juego si el gancho no la da (igual que shader_params.rs).
     let camara = game.native_camera().map(|c| c.position).unwrap_or(game.view.position);
     let (lluvia, trueno) = game.weather_levels(1.0);
@@ -326,9 +332,9 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
     }
     cl::contar_superficie(creadas_sup);
 
-    // 3) Efectos sobre bloques (`tickBlockFX`): polvo raso (`skittering_dust`).
+    // 3) Efectos sobre bloques (`tickBlockFX`): polvo raso (`skittering_dust`), salpicadura (`splatter`) y humo (`smoke`).
     let mut creadas_bloque = 0u32;
-    if cfg.polvo_raso && cl::vivas() < u64::from(cfg.tope) {
+    if (cfg.polvo_raso || cfg.salpicadura || cfg.humo) && cl::vivas() < u64::from(cfg.tope) {
         let intentos_bloque = ((24.0 * cfg.densidad) as u32).max(1);
         let r = cfg.distancia;
         for _ in 0..intentos_bloque {
@@ -344,58 +350,94 @@ fn vulpe_client_tick(game: &mut crate::game::Game<'_>) {
                 continue;
             };
             let tope_y = super::render_tick::motion_blocking_height(world, properties, x, z);
-            let py = f64::from(tope_y) + 0.05;
+            let estado_suelo = world.block(x, tope_y - 1, z);
+            let f_suelo = facts.get(estado_suelo);
+            let es_lava = f_suelo.fluid == horizon_client::blocks::Fluid::Lava;
+            let altura_fluido = if f_suelo.fluid != horizon_client::blocks::Fluid::None {
+                f64::from(f_suelo.fluid_level) / 9.0
+            } else {
+                1.0
+            };
+            let py = f64::from(tope_y - 1) + altura_fluido + 0.05;
             let dist = ((px - camara[0]).powi(2) + (py - camara[1]).powi(2) + (pz - camara[2]).powi(2)).sqrt() as f32;
             if dist > r {
                 continue;
             }
             let bioma = biomes.get(chunk.biome(x, tope_y - 1, z));
-            if bioma.snows_at(x, tope_y - 1, z).is_some() || !cl::es_overworld(&bioma.name) {
-                continue;
-            }
-            let nombre_bloque = facts.get(world.block(x, tope_y - 1, z)).name.as_ref();
-            if !cl::es_bloque_arena(nombre_bloque) {
-                continue;
-            }
-            let probabilidad = azar.siguiente();
-            for efecto in cl::Efecto::ARRIBA_BLOQUE {
-                if !efecto.activa(&cfg) {
-                    continue;
+            let nombre_bloque = f_suelo.name.as_ref();
+            match bioma.snows_at(x, tope_y, z) {
+                None => {
+                    if !cfg.polvo_raso || !cl::es_overworld(&bioma.name) || !cl::es_bloque_arena(nombre_bloque) {
+                        continue;
+                    }
+                    let probabilidad = azar.siguiente();
+                    for efecto in cl::Efecto::ARRIBA_BLOQUE {
+                        if !efecto.activa(&cfg) {
+                            continue;
+                        }
+                        let d = efecto.datos();
+                        if d.densidad * cfg.densidad <= probabilidad {
+                            continue;
+                        }
+                        let pos = [px, py, pz];
+                        let ctrl = VulpeParticula {
+                            efecto,
+                            tamano_base: d.tamano,
+                            distancia_max: cfg.distancia,
+                            rebotes_borde: 0,
+                            giro: 0.0,
+                        };
+                        let Some(mut p) = particulas.controlled(d.sprites, pos, d.translucida, ctrl) else {
+                            sin_sprite += 1;
+                            continue;
+                        };
+                        let viento = cl::viento(pos[0], pos[1], pos[2], cl::tiempo(), &cfg);
+                        p.velocity = cl::velocidad_inicial_efecto(
+                            d.origen,
+                            d.gravedad,
+                            d.rebote,
+                            viento,
+                            if tormenta { d.viento_tormenta } else { d.viento },
+                        );
+                        p.lifetime = d.vida;
+                        p.size = d.tamano;
+                        let tinte = cl::tinte_bloque_arena(nombre_bloque, azar.siguiente());
+                        p.rgba = [tinte[0], tinte[1], tinte[2], 0.0];
+                        if d.num_sprites > 1 {
+                            particulas.set_sprite_frame(&mut p, (azar.siguiente() * d.num_sprites as f32) as usize);
+                        }
+                        particulas.push(p);
+                        cl::nace();
+                        creadas_bloque += 1;
+                    }
                 }
-                let d = efecto.datos();
-                if d.densidad * cfg.densidad <= probabilidad {
-                    continue;
+                Some(false) => {
+                    // Lluvia sobre bloques: humo en bloques calientes (`smoke`) y salpicadura con viento (`splatter`).
+                    let pos = [px, py, pz];
+                    if cfg.humo && cl::es_bloque_caliente(nombre_bloque, es_lava) {
+                        let viento = cl::viento(pos[0], pos[1], pos[2], cl::tiempo(), &cfg);
+                        particulas.add(
+                            &horizon_client::particles::ParticleOptions::simple(
+                                horizon_client::particles::ParticleType::Smoke,
+                            ),
+                            pos,
+                            [f64::from(viento[0] * 0.5), 0.04, f64::from(viento[1] * 0.5)],
+                        );
+                        creadas_bloque += 1;
+                    } else if cfg.salpicadura && !es_lava && azar.siguiente() < 0.35 * cfg.densidad {
+                        let viento = cl::viento(pos[0], pos[1], pos[2], cl::tiempo(), &cfg);
+                        let mult = if tormenta { 0.2 } else { 0.1 };
+                        particulas.add(
+                            &horizon_client::particles::ParticleOptions::simple(
+                                horizon_client::particles::ParticleType::Rain,
+                            ),
+                            pos,
+                            [f64::from(viento[0] * mult * 10.0), 0.0, f64::from(viento[1] * mult * 10.0)],
+                        );
+                        creadas_bloque += 1;
+                    }
                 }
-                let pos = [px, py, pz];
-                let ctrl = VulpeParticula {
-                    efecto,
-                    tamano_base: d.tamano,
-                    distancia_max: cfg.distancia,
-                    rebotes_borde: 0,
-                    giro: 0.0,
-                };
-                let Some(mut p) = particulas.controlled(d.sprites, pos, d.translucida, ctrl) else {
-                    sin_sprite += 1;
-                    continue;
-                };
-                let viento = cl::viento(pos[0], pos[1], pos[2], cl::tiempo(), &cfg);
-                p.velocity = cl::velocidad_inicial_efecto(
-                    d.origen,
-                    d.gravedad,
-                    d.rebote,
-                    viento,
-                    if tormenta { d.viento_tormenta } else { d.viento },
-                );
-                p.lifetime = d.vida;
-                p.size = d.tamano;
-                let tinte = cl::tinte_bloque_arena(nombre_bloque, azar.siguiente());
-                p.rgba = [tinte[0], tinte[1], tinte[2], 0.0];
-                if d.num_sprites > 1 {
-                    particulas.set_sprite_frame(&mut p, (azar.siguiente() * d.num_sprites as f32) as usize);
-                }
-                particulas.push(p);
-                cl::nace();
-                creadas_bloque += 1;
+                Some(true) => {}
             }
         }
     }
