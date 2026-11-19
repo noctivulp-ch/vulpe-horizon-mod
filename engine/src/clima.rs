@@ -1,9 +1,12 @@
-//! Clima con partículas: port de Particle Rain (pigcart, MIT; ver NOTICE). Etapa 1: lluvia y nieve, viento y la
-//! bandera para que el pack no dibuje su propia lluvia. Lógica pura, sin el juego: lo que lee el mundo y crea las
-//! partículas está en `client_tick.rs`. Porqué: docs/decisiones.md §7 y vulpe-horizon-spec/subsistemas/26.
+//! Clima con partículas: port de Particle Rain (pigcart, MIT; ver NOTICE).
+//! Lógica pura, sin el juego: lo que lee el mundo y crea las partículas está en `client_tick.rs`.
+//! Porqué: docs/decisiones.md §7–§8 y vulpe-horizon-spec/subsistemas/26.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// Tope real de distancia de nacimiento de `ParticleEngine::controlled` en Horizon (32 bloques).
+pub const MAX_DISTANCIA_CONTROLADA: f32 = 31.5;
 
 /// Ajustes de la sección `[clima]` de `config/vulpe-horizon.toml` (valores por defecto de Particle Rain y del dueño).
 #[derive(Clone, Debug, PartialEq)]
@@ -12,14 +15,22 @@ pub struct ClimaConfig {
     pub lluvia: bool,
     /// Nieve como partículas; igual que la lluvia.
     pub nieve: bool,
+    /// Polvo de arena en el aire (`dust`).
+    pub polvo: bool,
+    /// Granos de arena que saltan a ras del suelo (`skittering_dust`).
+    pub polvo_raso: bool,
+    /// Bruma de arena que pasa junto a la cámara (`dust_haze`).
+    pub bruma_polvo: bool,
     /// Multiplicador de la densidad de todos los efectos.
     pub densidad: f32,
     /// Tope de partículas vivas (`perf.particleAmount`).
     pub tope: u32,
     /// Densidad con tormenta (`perf.particleStormDensity`).
     pub densidad_tormenta: f32,
-    /// Radio de la esfera donde nacen, en bloques (`perf.particleDistance`).
+    /// Radio de la esfera donde nacen las de cielo, en bloques (`perf.particleDistance`).
     pub distancia: f32,
+    /// Alcance de los efectos de superficie (`perf.surfaceRange`; Horizon acota el nacimiento a 32 bloques).
+    pub alcance_superficie: f32,
     /// Viento: fuerza, frecuencia de las ráfagas y velocidad de modulación (`WindOptions`).
     pub viento_fuerza: f32,
     pub viento_rafagas: f32,
@@ -33,10 +44,14 @@ impl Default for ClimaConfig {
         Self {
             lluvia: true,
             nieve: true,
+            polvo: true,
+            polvo_raso: true,
+            bruma_polvo: true,
             densidad: 1.0,
             tope: 1500,
             densidad_tormenta: 1.5,
             distancia: 16.0,
+            alcance_superficie: 32.0,
             viento_fuerza: 0.03,
             viento_rafagas: 0.15,
             viento_modulacion: 0.1,
@@ -66,10 +81,14 @@ impl ClimaConfig {
             match k {
                 "lluvia" => c.lluvia = b,
                 "nieve" => c.nieve = b,
+                "polvo" => c.polvo = b,
+                "polvo_raso" => c.polvo_raso = b,
+                "bruma_polvo" => c.bruma_polvo = b,
                 "densidad" => c.densidad = f.unwrap_or(c.densidad).clamp(0.0, 4.0),
                 "tope" => c.tope = f.map(|x| x.clamp(0.0, 20000.0) as u32).unwrap_or(c.tope),
                 "densidad_tormenta" => c.densidad_tormenta = f.unwrap_or(c.densidad_tormenta).clamp(0.0, 4.0),
                 "distancia" => c.distancia = f.unwrap_or(c.distancia).clamp(4.0, 32.0),
+                "alcance_superficie" => c.alcance_superficie = f.unwrap_or(c.alcance_superficie).clamp(8.0, 100.0),
                 "viento_fuerza" => c.viento_fuerza = f.unwrap_or(c.viento_fuerza).clamp(0.0, 0.5),
                 "viento_rafagas" => c.viento_rafagas = f.unwrap_or(c.viento_rafagas).clamp(0.0, 2.0),
                 "viento_modulacion" => c.viento_modulacion = f.unwrap_or(c.viento_modulacion).clamp(0.0, 2.0),
@@ -84,79 +103,220 @@ impl ClimaConfig {
     pub fn to_toml_section(&self) -> String {
         format!(
             "\n[clima]\n# Lluvia y nieve como partículas del mod (sustituyen a las del pack)\nlluvia = {}\nnieve = {}\n\
+             # Polvo de arena en desiertos y mesas con lluvia/tormenta\npolvo = {}\npolvo_raso = {}\nbruma_polvo = {}\n\
              # Densidad relativa (0 .. 4)\ndensidad = {:.2}\n# Tope de partículas vivas\ntope = {}\n\
              # Densidad con tormenta\ndensidad_tormenta = {:.2}\n# Radio donde nacen, bloques (4 .. 32)\ndistancia = {:.1}\n\
+             # Alcance de efectos de superficie, bloques (8 .. 100; Horizon acota a 32)\nalcance_superficie = {:.1}\n\
              # Viento: fuerza, ráfagas, modulación y más viento con la altura\nviento_fuerza = {:.3}\nviento_rafagas = {:.3}\n\
              viento_modulacion = {:.3}\nviento_altura = {}\n",
-            self.lluvia, self.nieve, self.densidad, self.tope, self.densidad_tormenta, self.distancia,
+            self.lluvia, self.nieve, self.polvo, self.polvo_raso, self.bruma_polvo,
+            self.densidad, self.tope, self.densidad_tormenta, self.distancia, self.alcance_superficie,
             self.viento_fuerza, self.viento_rafagas, self.viento_modulacion, self.viento_altura
         )
     }
 }
 
-/// Los cuatro efectos de esta etapa, con los datos de `particles.json` de Particle Rain.
+/// Dónde nace un efecto (`ParticleData.SpawnPos`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Gota {
+pub enum Origen {
+    Cielo,
+    Superficie,
+    ArribaBloque,
+}
+
+/// Precipitación del bioma requerida (`Biome.Precipitation`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Precipitacion {
+    Lluvia,
+    Nieve,
+    Ninguna,
+}
+
+/// Cómo cambia la opacidad de la partícula (`ParticleData.FadeType`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Desvanecido {
+    Distancia,
+    EntradaSalida,
+    Salida,
+}
+
+/// Cómo se tiñe la partícula (`ParticleData.TintType`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tinte {
+    Ninguno,
+    Agua,
+    Mapa,
+}
+
+/// Efectos de partículas controladas con los datos de `particles.json` de Particle Rain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Efecto {
     Lluvia,
     LluviaFuerte,
     Nieve,
     NieveFuerte,
+    Polvo,
+    PolvoRaso,
+    BrumaPolvo,
 }
 
 /// Datos de un efecto (`ParticleData`).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct DatosGota {
+pub struct DatosEfecto {
     /// Nombre del juego de sprites del mod (`assets/vulpe/particles/<nombre>.json`).
     pub sprites: &'static str,
+    pub num_sprites: usize,
+    pub origen: Origen,
+    pub precipitacion: Precipitacion,
+    /// Solo con tormenta (`ONLY_DURING_STORMY_WEATHER`).
+    pub solo_tormenta: bool,
+    pub solo_overworld: bool,
     pub densidad: f32,
     pub gravedad: f32,
     pub viento: f32,
     pub viento_tormenta: f32,
+    pub rebote: f32,
     pub tamano: f32,
-    /// Solo con tormenta (`ONLY_DURING_STORMY_WEATHER`).
-    pub solo_tormenta: bool,
-    /// Nieve (precipitación `SNOW`) o lluvia (`RAIN`).
-    pub nieve: bool,
-    /// Tinte del agua (`tintType: WATER`).
-    pub tinte_agua: bool,
+    pub escala_distancia: f32,
+    pub opacidad: f32,
+    pub desvanecido: Desvanecido,
+    pub tinte: Tinte,
+    pub translucida: bool,
     pub vida: i32,
 }
 
-impl Gota {
-    pub const TODAS: [Gota; 4] = [Gota::Lluvia, Gota::LluviaFuerte, Gota::Nieve, Gota::NieveFuerte];
+impl Efecto {
+    pub const CIELO: [Efecto; 5] = [
+        Efecto::Lluvia,
+        Efecto::LluviaFuerte,
+        Efecto::Nieve,
+        Efecto::NieveFuerte,
+        Efecto::Polvo,
+    ];
+    pub const SUPERFICIE: [Efecto; 1] = [Efecto::BrumaPolvo];
+    pub const ARRIBA_BLOQUE: [Efecto; 1] = [Efecto::PolvoRaso];
 
-    pub fn datos(self) -> DatosGota {
+    pub fn datos(self) -> DatosEfecto {
         match self {
-            Gota::Lluvia => DatosGota {
-                sprites: "vulpe:lluvia", densidad: 1.0, gravedad: 0.9, viento: 0.4, viento_tormenta: 0.8,
-                tamano: 0.75, solo_tormenta: false, nieve: false, tinte_agua: true, vida: 3000,
+            Efecto::Lluvia => DatosEfecto {
+                sprites: "vulpe:lluvia", num_sprites: 16, origen: Origen::Cielo,
+                precipitacion: Precipitacion::Lluvia, solo_tormenta: false, solo_overworld: false,
+                densidad: 1.0, gravedad: 0.9, viento: 0.4, viento_tormenta: 0.8, rebote: 0.0,
+                tamano: 0.75, escala_distancia: 0.0, opacidad: 1.0, desvanecido: Desvanecido::Distancia,
+                tinte: Tinte::Agua, translucida: true, vida: 3000,
             },
-            Gota::LluviaFuerte => DatosGota {
-                sprites: "vulpe:lluvia_fuerte", densidad: 1.0, gravedad: 1.0, viento: 0.4, viento_tormenta: 0.8,
-                tamano: 0.75, solo_tormenta: true, nieve: false, tinte_agua: true, vida: 3000,
+            Efecto::LluviaFuerte => DatosEfecto {
+                sprites: "vulpe:lluvia_fuerte", num_sprites: 4, origen: Origen::Cielo,
+                precipitacion: Precipitacion::Lluvia, solo_tormenta: true, solo_overworld: false,
+                densidad: 1.0, gravedad: 1.0, viento: 0.4, viento_tormenta: 0.8, rebote: 0.0,
+                tamano: 0.75, escala_distancia: 0.0, opacidad: 1.0, desvanecido: Desvanecido::Distancia,
+                tinte: Tinte::Agua, translucida: true, vida: 3000,
             },
-            Gota::Nieve => DatosGota {
-                sprites: "vulpe:nieve", densidad: 0.3, gravedad: 0.05, viento: 0.01, viento_tormenta: 0.1,
-                tamano: 0.75, solo_tormenta: false, nieve: true, tinte_agua: false, vida: 3000,
+            Efecto::Nieve => DatosEfecto {
+                sprites: "vulpe:nieve", num_sprites: 16, origen: Origen::Cielo,
+                precipitacion: Precipitacion::Nieve, solo_tormenta: false, solo_overworld: false,
+                densidad: 0.3, gravedad: 0.05, viento: 0.01, viento_tormenta: 0.1, rebote: 0.0,
+                tamano: 0.75, escala_distancia: 0.0, opacidad: 1.0, desvanecido: Desvanecido::Distancia,
+                tinte: Tinte::Ninguno, translucida: true, vida: 3000,
             },
-            Gota::NieveFuerte => DatosGota {
-                sprites: "vulpe:nieve_fuerte", densidad: 0.4, gravedad: 0.1, viento: 0.01, viento_tormenta: 0.1,
-                tamano: 0.75, solo_tormenta: true, nieve: true, tinte_agua: false, vida: 3000,
+            Efecto::NieveFuerte => DatosEfecto {
+                sprites: "vulpe:nieve_fuerte", num_sprites: 4, origen: Origen::Cielo,
+                precipitacion: Precipitacion::Nieve, solo_tormenta: true, solo_overworld: false,
+                densidad: 0.4, gravedad: 0.1, viento: 0.01, viento_tormenta: 0.1, rebote: 0.0,
+                tamano: 0.75, escala_distancia: 0.0, opacidad: 1.0, desvanecido: Desvanecido::Distancia,
+                tinte: Tinte::Ninguno, translucida: true, vida: 3000,
+            },
+            Efecto::Polvo => DatosEfecto {
+                sprites: "vulpe:polvo", num_sprites: 3, origen: Origen::Cielo,
+                precipitacion: Precipitacion::Ninguna, solo_tormenta: false, solo_overworld: true,
+                densidad: 1.0, gravedad: 0.1, viento: 0.7, viento_tormenta: 1.0, rebote: 0.0,
+                tamano: 0.25, escala_distancia: 0.0, opacidad: 1.0, desvanecido: Desvanecido::Distancia,
+                tinte: Tinte::Mapa, translucida: true, vida: 3000,
+            },
+            Efecto::PolvoRaso => DatosEfecto {
+                sprites: "vulpe:polvo", num_sprites: 3, origen: Origen::ArribaBloque,
+                precipitacion: Precipitacion::Ninguna, solo_tormenta: false, solo_overworld: true,
+                densidad: 0.2, gravedad: 0.5, viento: 0.8, viento_tormenta: 1.0, rebote: 0.15,
+                tamano: 0.2, escala_distancia: 0.0, opacidad: 1.0, desvanecido: Desvanecido::Distancia,
+                tinte: Tinte::Mapa, translucida: false, vida: 60,
+            },
+            Efecto::BrumaPolvo => DatosEfecto {
+                sprites: "vulpe:bruma_polvo", num_sprites: 1, origen: Origen::Superficie,
+                precipitacion: Precipitacion::Ninguna, solo_tormenta: false, solo_overworld: true,
+                densidad: 1.0, gravedad: 0.1, viento: 0.5, viento_tormenta: 0.8, rebote: 0.15,
+                tamano: 0.4, escala_distancia: 1.0, opacidad: 0.4, desvanecido: Desvanecido::Distancia,
+                tinte: Tinte::Mapa, translucida: true, vida: 100,
             },
         }
     }
 
     /// Si el efecto está encendido en la configuración.
     pub fn activa(self, c: &ClimaConfig) -> bool {
-        if self.datos().nieve { c.nieve } else { c.lluvia }
+        match self {
+            Efecto::Lluvia | Efecto::LluviaFuerte => c.lluvia && c.nieve,
+            Efecto::Nieve | Efecto::NieveFuerte => c.lluvia && c.nieve,
+            Efecto::Polvo => c.polvo,
+            Efecto::PolvoRaso => c.polvo_raso,
+            Efecto::BrumaPolvo => c.bruma_polvo,
+        }
     }
+}
+
+/// Si el nombre del bloque (con o sin prefijo `minecraft:`) pertenece a la lista arenosa de `dust` / `skittering_dust` /
+/// `dust_haze` en `particles.json` (`#minecraft:sand`, `#minecraft:terracotta`, `#c:sandstone_blocks`, `coarse_dirt`).
+pub fn es_bloque_arena(nombre: &str) -> bool {
+    let n = nombre.rsplit(':').next().unwrap_or(nombre);
+    matches!(n, "sand" | "red_sand" | "suspicious_sand" | "terracotta" | "coarse_dirt")
+        || n.ends_with("_terracotta")
+        || n.ends_with("sandstone")
+}
+
+/// Tinte tipo `MAP` de Particle Rain para bloques arenosos, con variación aleatoria 0,8..1,0 (`TintType.MAP`).
+pub fn tinte_bloque_arena(nombre: &str, u: f32) -> [f32; 3] {
+    let n = nombre.rsplit(':').next().unwrap_or(nombre);
+    let base = match n {
+        "red_sand" | "red_sandstone" | "chiseled_red_sandstone" | "cut_red_sandstone" | "smooth_red_sandstone" => {
+            [0.85, 0.50, 0.20]
+        }
+        "coarse_dirt" => [0.59, 0.43, 0.30],
+        "white_terracotta" => [0.82, 0.69, 0.63],
+        "orange_terracotta" => [0.62, 0.33, 0.15],
+        "yellow_terracotta" => [0.73, 0.52, 0.14],
+        "red_terracotta" => [0.56, 0.24, 0.18],
+        "brown_terracotta" => [0.30, 0.20, 0.14],
+        "light_gray_terracotta" => [0.53, 0.42, 0.38],
+        "terracotta" => [0.60, 0.36, 0.25],
+        _ if n.ends_with("_terracotta") => [0.55, 0.35, 0.28],
+        _ => [0.86, 0.81, 0.64], // sand / sandstone (MapColor.SAND = 0xDBD3A0)
+    };
+    let var = 0.8 + 0.2 * u.clamp(0.0, 1.0);
+    [base[0] * var, base[1] * var, base[2] * var]
+}
+
+/// Si el bioma pertenece al Overworld (`#c:in_overworld`).
+pub fn es_overworld(bioma: &str) -> bool {
+    let n = bioma.rsplit(':').next().unwrap_or(bioma);
+    !matches!(
+        n,
+        "nether_wastes"
+            | "crimson_forest"
+            | "warped_forest"
+            | "soul_sand_valley"
+            | "basalt_deltas"
+            | "the_end"
+            | "end_highlands"
+            | "end_midlands"
+            | "small_end_islands"
+            | "end_barrens"
+            | "the_void"
+    )
 }
 
 /// Viento en un punto (`ParticleRain.getWind`): dos senos por eje que dan ráfagas, desplazados con el tiempo del
 /// mundo, y nulo bajo Y 50 si se ajusta por altura (de 0 en Y 50 a 1 en Y 90).
 pub fn viento(x: f64, y: f64, z: f64, tiempo_juego: f64, c: &ClimaConfig) -> [f32; 2] {
     let desfase = (tiempo_juego * f64::from(c.viento_modulacion)) as f32;
-    let altura = if c.viento_altura { ((y as f32 - 50.0) / 40.0).clamp(0.0, 1.0) } else { 0.0 };
+    let altura = if c.viento_altura { ((y as f32 - 50.0) / 40.0).clamp(0.0, 1.0) } else { 1.0 };
     let uno = |p: f32| -> f32 {
         let f = c.viento_rafagas;
         -((p * f + desfase).sin() * (p * f * 0.5 + desfase * 0.5).sin() * c.viento_fuerza + c.viento_fuerza)
@@ -175,6 +335,16 @@ pub fn densidad_cielo(c: &ClimaConfig, trueno: f32, velocidad: f32, inactivo: bo
     (tormenta * (1.0 + velocidad * 2.0) * c.densidad).max(0.0) as u32
 }
 
+/// Cuántas intenta crear por tick en superficie (`tickSurfaceFX`): tope/200, o 1 si inactivo.
+pub fn densidad_superficie(c: &ClimaConfig, trueno: f32, inactivo: bool) -> u32 {
+    if inactivo {
+        return 1;
+    }
+    let base = (c.tope / 200).max(1) as f32;
+    let tormenta = base + (base * c.densidad_tormenta - base) * trueno.clamp(0.0, 1.0);
+    (tormenta * c.densidad).max(1.0) as u32
+}
+
 /// Desplazamiento desde la cámara de un punto de nacimiento en la esfera de radio `r` (`tickSkyFX`). `u1..u3` son
 /// números al azar en 0..1. Parado, se concentran por encima de la cámara (también nacen algunas por debajo, como en
 /// el original); deprisa, reparto uniforme.
@@ -183,6 +353,20 @@ pub fn punto_nacimiento(u1: f32, u2: f32, u3: f32, rapido: bool, r: f32) -> [f32
     let theta = std::f32::consts::TAU * u3;
     let phi = (2.0 * altura - 1.0).clamp(-1.0, 1.0).acos();
     [r * phi.sin() * theta.cos(), r * phi.cos(), r * phi.sin() * theta.sin()]
+}
+
+/// Desplazamiento horizontal triangular (`RANDOM.triangle`) para `tickSurfaceFX`, acotado al límite de Horizon (31,5).
+pub fn punto_superficie(u1: f32, u2: f32, u3: f32, u4: f32, alcance: f32) -> [f32; 2] {
+    let r = alcance.min(MAX_DISTANCIA_CONTROLADA);
+    let mut dx = (u1 - u2) * r;
+    let mut dz = (u3 - u4) * r;
+    let len = (dx * dx + dz * dz).sqrt();
+    if len > MAX_DISTANCIA_CONTROLADA {
+        let s = MAX_DISTANCIA_CONTROLADA / len;
+        dx *= s;
+        dz *= s;
+    }
+    [dx, dz]
 }
 
 /// Un tick del movimiento (`Particle.tick` de vanilla con el viento de `WindManager.applyWind`): el viento se suma a
@@ -195,17 +379,87 @@ pub fn paso(vel: [f64; 3], gravedad: f32, viento: [f32; 2], mult_viento: f32) ->
     [v[0] * 0.98, v[1] * 0.98, v[2] * 0.98]
 }
 
-/// Velocidad inicial (`CustomParticle`): cae a `gravedad` bloques por tick con el viento de nacimiento (×10).
-pub fn velocidad_inicial(gravedad: f32, viento: [f32; 2], mult_viento: f32) -> [f64; 3] {
-    [f64::from(viento[0] * mult_viento * 10.0), -f64::from(gravedad), f64::from(viento[1] * mult_viento * 10.0)]
+/// Velocidad inicial (`CustomParticle`): cae a `gravedad` bloques por tick si nace en el cielo, o sube a `rebote` si
+/// nace sobre un bloque/superficie, con el viento de nacimiento (×10).
+pub fn velocidad_inicial_efecto(
+    origen: Origen,
+    gravedad: f32,
+    rebote: f32,
+    viento: [f32; 2],
+    mult_viento: f32,
+) -> [f64; 3] {
+    let yd = if origen == Origen::Cielo { -f64::from(gravedad) } else { f64::from(rebote) };
+    [f64::from(viento[0] * mult_viento * 10.0), yd, f64::from(viento[1] * mult_viento * 10.0)]
 }
 
-/// Opacidad por la distancia a la cámara (`FadeType.DISTANCE`): entera hasta 2/3 del radio, nula en el radio; por la
-/// fuerza de la lluvia del momento (sube y baja con ella).
+/// Velocidad inicial para lluvia/nieve (mantiene compatibilidad con pruebas previas).
+pub fn velocidad_inicial(gravedad: f32, viento: [f32; 2], mult_viento: f32) -> [f64; 3] {
+    velocidad_inicial_efecto(Origen::Cielo, gravedad, 0.0, viento, mult_viento)
+}
+
+/// Rebote contra una cara sólida (`CustomParticle.onCollision`): devuelve la nueva velocidad o `None` si excede los
+/// 3 rebotes laterales (evita atascos en paredes).
+pub fn rebotar(vel: [f64; 3], normal: [f64; 3], rebote: f32, rebotes_borde: &mut u8) -> Option<[f64; 3]> {
+    if rebote <= 0.0 {
+        return None;
+    }
+    let rapidez = (vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]).sqrt();
+    let impulso = f64::from(rebote) * rapidez * 6.0;
+    let mut nueva = vel;
+    if normal[1] == 0.0 {
+        if *rebotes_borde >= 3 {
+            return None;
+        }
+        *rebotes_borde += 1;
+        nueva[1] += 0.5 * impulso;
+    }
+    nueva[0] += normal[0] * impulso;
+    nueva[1] += normal[1] * impulso;
+    nueva[2] += normal[2] * impulso;
+    Some(nueva)
+}
+
+/// Tamaño escalado por distancia (`CustomParticle.getDistanceSize`).
+pub fn tamano_por_distancia(base: f32, distancia: f32, escala: f32) -> f32 {
+    if escala <= 0.0 {
+        return base;
+    }
+    base + base * distancia * escala
+}
+
+/// Opacidad por distancia, vida o salida (`CustomParticle.tickFading`), multiplicada por `opacidad` y `nivel_clima`.
+pub fn alfa_efecto(
+    desvanecido: Desvanecido,
+    distancia: f32,
+    radio: f32,
+    edad: i32,
+    vida: i32,
+    opacidad: f32,
+    nivel_clima: f32,
+) -> f32 {
+    let base = match desvanecido {
+        Desvanecido::Distancia => {
+            let caida = (radio / 3.0).max(0.1);
+            let t = (((distancia + caida) / caida) - 3.0).clamp(0.0, 1.0);
+            (1.0 - t) * opacidad
+        }
+        Desvanecido::EntradaSalida => {
+            let mitad = (vida / 2).max(1) as f32;
+            let e = edad.max(0) as f32;
+            let f = if e < mitad { e / mitad } else { ((vida as f32) - e) / mitad };
+            f.clamp(0.0, 1.0) * opacidad
+        }
+        Desvanecido::Salida => {
+            let mitad = (vida / 2).max(1) as f32;
+            (((vida - edad) as f32) / mitad).clamp(0.0, 1.0) * opacidad
+        }
+    };
+    (base * nivel_clima.clamp(0.0, 1.0)).clamp(0.0, 1.0)
+}
+
+/// Opacidad por la distancia a la cámara (`FadeType.DISTANCE`, opacidad 1,0).
 pub fn alfa(distancia: f32, radio: f32, lluvia: f32) -> f32 {
-    let caida = radio / 3.0;
-    let t = (((distancia + caida) / caida) - 3.0).clamp(0.0, 1.0);
-    (1.0 - t) * lluvia.clamp(0.0, 1.0)
+    alfa_efecto(Desvanecido::Distancia, distancia, radio, 0, 1, 1.0, lluvia)
 }
 
 /// Tinte del agua sobre el sprite gris (`TintType.WATER` con `tintMix` 0,6): el color del agua por defecto de vanilla.
@@ -222,6 +476,7 @@ static TRUENO: AtomicBool = AtomicBool::new(false);
 static PARTICULAS_ACTIVAS: AtomicBool = AtomicBool::new(false);
 static LLUVIA: AtomicU64 = AtomicU64::new(0);
 static TICKS_SIN_CREAR: AtomicU64 = AtomicU64::new(1000);
+static TICKS_SIN_SUPERFICIE: AtomicU64 = AtomicU64::new(1000);
 static VIVAS: AtomicU64 = AtomicU64::new(0);
 static CONFIG: Mutex<Option<ClimaConfig>> = Mutex::new(None);
 
@@ -262,17 +517,31 @@ pub fn recortar_vivas(total_motor: u64) {
     let _ = VIVAS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(v.min(total_motor)));
 }
 
-/// Si lleva más de 100 ticks sin crear ninguna (`ticksUntilSkyFXIdle`): entonces solo prueba 4 por tick.
+/// Si lleva más de 100 ticks sin crear ninguna de cielo (`ticksUntilSkyFXIdle`): entonces solo prueba 4 por tick.
 pub fn inactivo() -> bool {
     TICKS_SIN_CREAR.load(Ordering::Relaxed) > 100
 }
 
-/// Cuenta un tick: `creadas` las que nacieron en él.
+/// Cuenta un tick de cielo: `creadas` las que nacieron en él.
 pub fn contar_tick(creadas: u32) {
     if creadas > 0 {
         TICKS_SIN_CREAR.store(0, Ordering::Relaxed);
     } else {
         TICKS_SIN_CREAR.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Si lleva más de 100 ticks sin crear ninguna de superficie (`ticksUntilSurfaceFXIdle`).
+pub fn inactivo_superficie() -> bool {
+    TICKS_SIN_SUPERFICIE.load(Ordering::Relaxed) > 100
+}
+
+/// Cuenta un tick de superficie.
+pub fn contar_superficie(creadas: u32) {
+    if creadas > 0 {
+        TICKS_SIN_SUPERFICIE.store(0, Ordering::Relaxed);
+    } else {
+        TICKS_SIN_SUPERFICIE.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -328,8 +597,8 @@ impl Azar {
 
 #[cfg(test)]
 mod tests {
-    //! Por qué se prueba: si el viento, la densidad o el movimiento se salen de los valores de Particle Rain, la lluvia
-    //! cae recta o no cae, o llena la escena de partículas y hunde los fps del dueño sin que se note en el código.
+    //! Por qué se prueba: si el viento, la densidad, el rebote o las listas de bloques se salen de los valores de
+    //! Particle Rain, el polvo no nace en el desierto o llena la escena de partículas y hunde los fps del dueño.
     use super::*;
 
     #[test]
@@ -337,7 +606,6 @@ mod tests {
         let c = ClimaConfig::default();
         assert_eq!(viento(10.0, 40.0, 10.0, 100.0, &c), [0.0, 0.0]);
         let v = viento(10.0, 120.0, 10.0, 100.0, &c);
-        // −(sin·sin·f + f) está entre −2f y 0.
         assert!(v[0] <= 0.0 && v[0] >= -2.0 * c.viento_fuerza - 1e-6);
     }
 
@@ -360,7 +628,6 @@ mod tests {
             assert!((r - 16.0).abs() < 1e-3, "{r}");
             media_y += p[1] / 400.0;
         }
-        // Parado se concentran por encima de la cámara (media de y claramente positiva).
         assert!(media_y > 2.0, "{media_y}");
     }
 
@@ -371,7 +638,6 @@ mod tests {
         for _ in 0..1000 {
             v = paso(v, 0.9, [0.0, 0.0], 0.4);
         }
-        // Velocidad límite: 0,04·0,9·0,98/0,02.
         assert!((v[1] + 1.764).abs() < 0.01, "{}", v[1]);
     }
 
@@ -383,9 +649,53 @@ mod tests {
     }
 
     #[test]
+    fn bloques_y_tinte_de_arena() {
+        assert!(es_bloque_arena("minecraft:sand"));
+        assert!(es_bloque_arena("minecraft:red_sand"));
+        assert!(es_bloque_arena("minecraft:smooth_sandstone"));
+        assert!(es_bloque_arena("minecraft:orange_terracotta"));
+        assert!(es_bloque_arena("minecraft:coarse_dirt"));
+        assert!(!es_bloque_arena("minecraft:grass_block"));
+        assert!(!es_bloque_arena("minecraft:stone"));
+        let t_arena = tinte_bloque_arena("minecraft:sand", 1.0);
+        let t_roja = tinte_bloque_arena("minecraft:red_sand", 1.0);
+        assert!(t_arena[0] > 0.8 && t_arena[2] > 0.5);
+        assert!(t_roja[0] > t_roja[2] * 2.0);
+        assert!(es_overworld("minecraft:desert"));
+        assert!(!es_overworld("minecraft:nether_wastes"));
+        assert!(!es_overworld("minecraft:the_end"));
+    }
+
+    #[test]
+    fn rebote_en_suelo_y_pared_con_limite() {
+        let mut bordes = 0u8;
+        let v = rebotar([-0.2, -0.3, 0.0], [0.0, 1.0, 0.0], 0.15, &mut bordes).unwrap();
+        assert!(v[1] > -0.3);
+        assert_eq!(bordes, 0);
+        // Tres rebotes laterales pasan; el cuarto mata la partícula.
+        for _ in 0..3 {
+            let vb = rebotar([-0.2, 0.0, 0.0], [1.0, 0.0, 0.0], 0.15, &mut bordes).unwrap();
+            assert!(vb[1] > 0.0);
+        }
+        assert!(rebotar([-0.2, 0.0, 0.0], [1.0, 0.0, 0.0], 0.15, &mut bordes).is_none());
+    }
+
+    #[test]
+    fn punto_superficie_respeta_limite_horizon() {
+        let mut a = Azar::new(42);
+        for _ in 0..200 {
+            let p = punto_superficie(a.siguiente(), a.siguiente(), a.siguiente(), a.siguiente(), 100.0);
+            let r = (p[0] * p[0] + p[1] * p[1]).sqrt();
+            assert!(r <= MAX_DISTANCIA_CONTROLADA + 1e-4, "{r}");
+        }
+    }
+
+    #[test]
     fn config_lee_la_seccion_clima() {
-        let c = ClimaConfig::from_toml_str("[cielo]\nlluvia = false\n[clima]\nlluvia = false\ntope = 800\n");
-        assert!(!c.lluvia && c.nieve);
+        let c = ClimaConfig::from_toml_str(
+            "[cielo]\nlluvia = false\n[clima]\nlluvia = false\npolvo = false\ntope = 800\n",
+        );
+        assert!(!c.lluvia && c.nieve && !c.polvo && c.polvo_raso && c.bruma_polvo);
         assert_eq!(c.tope, 800);
         let ida = ClimaConfig::from_toml_str(&ClimaConfig::default().to_toml_section());
         assert_eq!(ida, ClimaConfig::default());

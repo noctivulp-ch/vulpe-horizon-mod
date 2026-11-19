@@ -40,6 +40,39 @@ def copo(img, rnd):
             img.putpixel((x + dx, y + dy), (250, 250, 255, 150 if borde else 235))
 
 
+def polvo(img, rnd):
+    """Granos irregulares de arena/polvo claros (se tiñen según el bloque en el juego)."""
+    cx = LADO // 2 + rnd.randrange(-3, 4)
+    cy = LADO // 2 + rnd.randrange(-3, 4)
+    for _ in range(rnd.randrange(3, 7)):
+        x = max(1, min(LADO - 2, cx + rnd.randrange(-4, 5)))
+        y = max(1, min(LADO - 2, cy + rnd.randrange(-4, 5)))
+        t = rnd.choice([1, 2, 2])
+        a = rnd.randrange(175, 245)
+        v = rnd.randrange(215, 255)
+        for dx in range(t):
+            for dy in range(t):
+                if 0 <= x + dx < LADO and 0 <= y + dy < LADO:
+                    img.putpixel((x + dx, y + dy), (v, v, v, a))
+
+
+def bruma_polvo(img, rnd):
+    """Nube suave con tramado ligero para la bruma de arena (se tiñe en el juego)."""
+    centro = (LADO - 1) * 0.5
+    radio = LADO * 0.48
+    for y in range(LADO):
+        for x in range(LADO):
+            d = ((x - centro) ** 2 + (y - centro) ** 2) ** 0.5 / radio
+            if d >= 1.0:
+                continue
+            peso = (1.0 - d * d) ** 2
+            # Tramado suave para que se sienta arenosa y no un disco plano.
+            ruido = 0.78 + 0.22 * rnd.random()
+            a = int(min(255, max(0, peso * ruido * 210)))
+            if a > 6:
+                img.putpixel((x, y), (242, 240, 235, a))
+
+
 def juego(nombre, cuantas, dibujar, por_sprite, rnd):
     texturas = []
     for i in range(cuantas):
@@ -60,6 +93,8 @@ def main():
     juego("lluvia_fuerte", 4, gota, 4, rnd)
     juego("nieve", 16, copo, 1, rnd)
     juego("nieve_fuerte", 4, copo, 4, rnd)
+    juego("polvo", 3, polvo, 1, rnd)
+    juego("bruma_polvo", 1, bruma_polvo, 1, rnd)
 
 
 if __name__ == "__main__":
