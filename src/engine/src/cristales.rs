@@ -32,6 +32,21 @@ pub const VAHO_DISTANCIA_MAX: f64 = 1.5;
 pub const VAHO_CRECE_S: f32 = 6.0;
 pub const VAHO_DESVANECE_S: f32 = 5.0;
 
+/// Tiempos de acumulación y limpieza por el viento de la arena en bioma seco (segundos, spec 27 §5).
+pub const ARENA_CRECE_S: f32 = 12.0;
+pub const ARENA_LIMPIA_S: f32 = 180.0;
+
+/// Cierto si un bioma del Overworld es seco (desierto, sabana, mesa y secos de mods).
+pub fn es_bioma_seco(bioma: &str, has_precipitation: bool, temperature: f32) -> bool {
+    crate::clima::es_overworld(bioma) && !has_precipitation && temperature >= 1.0
+}
+
+/// Cierto si la arena del bioma es roja (mesas / badlands y variantes de mods).
+pub fn es_bioma_mesa(bioma: &str) -> bool {
+    let n = bioma.rsplit(':').next().unwrap_or(bioma);
+    n.contains("badlands") || n.contains("mesa") || n.contains("red_desert")
+}
+
 /// Cierto si el identificador de bloque corresponde a un cristal o panel de cristal (27).
 pub fn es_bloque_cristal(id: &str) -> bool {
     let nombre = id.rsplit(':').next().unwrap_or(id);
@@ -197,6 +212,7 @@ struct EstadoCristales {
     tiene_vaho_pos: bool,
     ultimo: Instant,
     ultimo_aliento: Instant,
+    ultimo_arena: Instant,
 }
 
 static CONFIG: Mutex<CristalesConfig> = Mutex::new(CristalesConfig {
@@ -313,6 +329,7 @@ pub fn observar_lluvia_y_frio_en(
         tiene_vaho_pos: false,
         ultimo: ahora,
         ultimo_aliento: ahora,
+        ultimo_arena: ahora,
     });
 
     let dt = ahora
@@ -417,6 +434,49 @@ pub fn observar_aliento_en(
     }
 }
 
+/// Observa la arena tras tormenta en bioma seco (parte 5): crece con lluvia/tormenta eléctrica y
+/// el viento se la lleva en ~3 min tras despejar.
+pub fn observar_arena(
+    fuerza_lluvia: f32,
+    fuerza_trueno: f32,
+    bioma_seco: bool,
+    arena_roja: bool,
+) {
+    observar_arena_en(fuerza_lluvia, fuerza_trueno, bioma_seco, arena_roja, Instant::now());
+}
+
+/// Variante determinista para pruebas unitarias (parte 5).
+pub fn observar_arena_en(
+    fuerza_lluvia: f32,
+    fuerza_trueno: f32,
+    bioma_seco: bool,
+    arena_roja: bool,
+    ahora: Instant,
+) {
+    let Ok(mut lock) = ESTADO.lock() else { return };
+    let Some(st) = lock.as_mut() else { return };
+
+    let dt = ahora
+        .saturating_duration_since(st.ultimo_arena)
+        .as_secs_f32()
+        .clamp(0.0, MAX_DT_S);
+    st.ultimo_arena = ahora;
+
+    st.bioma_seco = bioma_seco;
+    if bioma_seco {
+        st.arena_roja = arena_roja;
+    }
+
+    let lluvia = fuerza_lluvia.clamp(0.0, 1.0);
+    let trueno = fuerza_trueno.clamp(0.0, 1.0);
+    if bioma_seco && lluvia > 0.01 {
+        let objetivo = (0.68 * lluvia + 0.32 * trueno).clamp(0.0, 1.0);
+        let ritmo = if trueno > 0.2 { ARENA_CRECE_S * 0.65 } else { ARENA_CRECE_S };
+        st.arena = (st.arena + dt / ritmo).min(objetivo.max(st.arena));
+    } else if st.arena > 0.0 {
+        st.arena = (st.arena - dt / ARENA_LIMPIA_S).max(0.0);
+    }
+}
 /// Empaqueta dos valores normalizados `[0, 1]` a 12 bits cada uno en un `f32` exacto (≤ 2²⁴ − 1).
 #[inline]
 pub fn empaquetar_par12(alto: f32, bajo: f32) -> f32 {
@@ -471,7 +531,9 @@ pub fn shader_params(camara: Option<[f64; 3]>) -> Option<([f32; 4], [f32; 4])> {
     if st.bioma_frio {
         flags12 |= 1 << 11;
     }
-    let m6_z = empaquetar_valor12_flags12(st.arena, flags12);
+    // Solo aplica arena sobre los cristales del bioma seco (spec 27 §5).
+    let arena_visible = if st.bioma_seco { st.arena } else { 0.0 };
+    let m6_z = empaquetar_valor12_flags12(arena_visible, flags12);
     let m6_w = empaquetar_par12(st.viento_xz[0] * 0.5 + 0.5, st.viento_xz[1] * 0.5 + 0.5);
 
     let m7 = if st.tiene_vaho_pos && st.vaho_peso > 0.0 {
@@ -499,7 +561,7 @@ pub fn resumen_estado() -> String {
         return "n/d".to_string();
     };
     format!(
-        "lluvia={}({:.2}/sec={:.1}s) escarcha={:.2} copos={:.2} monton={:.2} vaho={:.2} nieve={} arena={} aliento={}",
+        "lluvia={}({:.2}/sec={:.1}s) escarcha={:.2} copos={:.2} monton={:.2} vaho={:.2} arena={:.2}{} nieve={} arena_cfg={} aliento={}",
         cfg.lluvia.as_str(),
         st.lluvia_pico,
         st.lluvia_secado_s,
@@ -507,6 +569,8 @@ pub fn resumen_estado() -> String {
         st.copos,
         st.monton,
         st.vaho_peso,
+        st.arena,
+        if st.arena_roja { "(roja)" } else { "" },
         cfg.nieve.as_str(),
         cfg.arena.as_str(),
         if cfg.aliento { "sí" } else { "no" },
@@ -698,6 +762,47 @@ mod tests {
         let (m6, m7_spec) = shader_params(Some([10.0, 65.0, 21.0])).unwrap();
         assert_eq!(m7_spec[3], 0.0);
         assert_ne!((m6[2] as u32) & (1 << 9), 0);
+        limpiar();
+    }
+
+    #[test]
+    fn test_arena_tras_tormenta_y_mesa_roja() {
+        let _g = test_lock();
+        limpiar();
+        set_config(CristalesConfig::default());
+        assert!(es_bioma_seco("minecraft:desert", false, 2.0));
+        assert!(es_bioma_seco("minecraft:badlands", false, 2.0));
+        assert!(!es_bioma_seco("minecraft:nether_wastes", false, 2.0));
+        assert!(es_bioma_mesa("minecraft:wooded_badlands"));
+        assert!(!es_bioma_mesa("minecraft:desert"));
+
+        let t0 = Instant::now();
+        observar_lluvia_y_frio_en(1.0, 1.0, false, 2.0, 0.0, [-0.8, 0.2], t0);
+        let mut t = t0;
+        for _ in 0..10 {
+            t += Duration::from_secs(1);
+            observar_arena_en(1.0, 1.0, true, true, t);
+        }
+        let (m6, _) = shader_params(None).unwrap();
+        let code = m6[2] as u32;
+        let arena = (code / 4096) as f32 / 4095.0;
+        assert!(arena > 0.9, "arena acumulada en tormenta eléctrica: {arena}");
+        assert_ne!(code & (1 << 8), 0, "bandera arena roja en mesa");
+
+        // Tras despejar 60 s: aún queda ~2/3 de arena (se va en ~3 min).
+        for _ in 0..60 {
+            t += Duration::from_secs(1);
+            observar_arena_en(0.0, 0.0, true, true, t);
+        }
+        let (m6_tras, _) = shader_params(None).unwrap();
+        let arena_tras = ((m6_tras[2] as u32) / 4096) as f32 / 4095.0;
+        assert!(arena_tras > 0.5 && arena_tras < arena, "arena bajando: {arena_tras}");
+
+        // Al salir a un bioma no seco no se dibuja arena en sus cristales.
+        t += Duration::from_secs(1);
+        observar_arena_en(0.0, 0.0, false, false, t);
+        let (m6_fuera, _) = shader_params(None).unwrap();
+        assert_eq!((m6_fuera[2] as u32) / 4096, 0);
         limpiar();
     }
 }

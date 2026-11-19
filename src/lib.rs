@@ -129,7 +129,7 @@ fn factor_noche_ticks(day_time: Option<i64>) -> f32 {
     }
 }
 
-/// Observa el clima de los cristales (N-08, partes 1 y 2: lluvia/secado, escarcha en el frío y viento).
+/// Observa el clima de los cristales (N-08, partes 1–5: lluvia/secado, escarcha, nieve, aliento y arena).
 fn observe_glass_weather(host: &dyn ClientHost, camera_pos: Option<[f64; 3]>, day_time: Option<i64>) {
     let (Some(level), Some(cam)) = (host.level(host.dimension()), camera_pos) else {
         vulpe_engine::cristales::limpiar();
@@ -143,16 +143,20 @@ fn observe_glass_weather(host: &dyn ClientHost, camera_pos: Option<[f64; 3]>, da
     let (lluvia, trueno) = level.weather(host).unwrap_or((0.0, 0.0));
     let mut temp_efectiva = 0.8_f32;
     let mut llueve_en_bioma = false;
-    if let Some(props) = level
-        .client_biome(host, pos)
-        .and_then(|b| level.biome_properties(host, &b))
-    {
-        temp_efectiva = if pos[1] > 80 {
-            props.temperature - (pos[1] - 80) as f32 * 0.00125
-        } else {
-            props.temperature
-        };
-        llueve_en_bioma = props.has_precipitation && temp_efectiva >= 0.15;
+    let mut bioma_seco = false;
+    let mut arena_roja = false;
+    if let Some(bioma) = level.client_biome(host, pos) {
+        if let Some(props) = level.biome_properties(host, &bioma) {
+            temp_efectiva = if pos[1] > 80 {
+                props.temperature - (pos[1] - 80) as f32 * 0.00125
+            } else {
+                props.temperature
+            };
+            llueve_en_bioma = props.has_precipitation && temp_efectiva >= 0.15;
+            bioma_seco =
+                vulpe_engine::cristales::es_bioma_seco(&bioma, props.has_precipitation, props.temperature);
+            arena_roja = bioma_seco && vulpe_engine::cristales::es_bioma_mesa(&bioma);
+        }
     }
 
     let cfg_clima = vulpe_engine::clima::config();
@@ -213,6 +217,7 @@ fn observe_glass_weather(host: &dyn ClientHost, camera_pos: Option<[f64; 3]>, da
         }
     }
     vulpe_engine::cristales::observar_aliento(mejor_punto, es_espectador);
+    vulpe_engine::cristales::observar_arena(lluvia, trueno, bioma_seco, arena_roja);
 }
 
 #[derive(Default)]
