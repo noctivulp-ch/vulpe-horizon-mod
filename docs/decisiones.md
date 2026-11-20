@@ -326,3 +326,64 @@ Con la actualización a Horizon `nightly-2026-11-18-dd67b76` (`dd67b76ff23e28c6d
     lava 15 s, agua, bloques anegados, lluvia, `mods[3].z` y `FLAG_PLAYER_VALID`).
   - Empaquetado y compilado en `vulpe-pruebas` (`native-dd67b76-9841443bb307`): `/vulpe estado` devuelve
     `mods[0]=(1002, 1, 13, 0)` con `llamas=no` fuera del fuego y `llamas=sí (8.0s)` de pie en `minecraft:fire`.
+
+## 12. El tiempo en los cristales v2 y formato 4 de `frame.mods` (N-09, 2026-11-19)
+
+Especificación: `vulpe-horizon-spec/subsistemas/27-tiempo-en-los-cristales.md` (versión 2).
+
+### 12.1 Reparto de `frame.mods` (formato 4, firma `1004.0`, bit 8 `FLAG_GLASS_VALID = 256`)
+
+- `mods[0].x = 1004.0` (mantiene compatibilidad hacia atrás en el shader con 1001/1002/1003).
+- `mods[4..5]`: hasta 8 ajustes en vivo (`id * 4096 + q`), sin cambios respecto al formato 3.
+- `mods[6].x`: `triple8(escarcha, repisa, condensacion)` (8 bits cada uno, `0..1`).
+- `mods[6].y`: `triple8(arena_visible, viento_x * 0.5 + 0.5, viento_z * 0.5 + 0.5)`.
+- `mods[6].z`: 24 bits de banderas:
+  - bits `0..1`: lluvia (`0` apagada, `1` poca ×0,5, `2` normal ×1, `3` mucha ×1,7)
+  - bits `2..3`: nieve (mismo reparto)
+  - bits `4..5`: arena (`0` apagada, `1` poca ×0,5, `2` normal ×1, `3` mucha ×1,4)
+  - bit `6`: estilo lluvia (`0` gotas, `1` regueros)
+  - bits `7..8`: resolución (`0` = 16, `1` = 32 por defecto, `2` = 64)
+  - bit `9`: seguir viento (`1` por defecto)
+  - bit `10`: lado interior activo (`1` por defecto)
+  - bits `11..12`: estilo borde helado (`0` apagado, `1` banda por defecto, `2` cristales)
+  - bits `13..14`: nivel desenfoque (`0` apagado, `1` suave por defecto, `2` normal, `3` fuerte)
+  - bit `15`: arena roja (mesas/badlands)
+  - bit `16`: modo espectador (apaga el vaho)
+  - bit `17`: bioma seco
+  - bit `18`: bioma frío
+  - bit `19`: bioma lluvioso
+  - bits `20..23`: escala de la elipse de vaho (`0..15` → `1.0..1.7`)
+- `mods[6].w`: `cuarteto6(cond_opacidad/2.5, cond_blancura, aliento_opacidad/2.5, aliento_blancura)`.
+- `mods[7]`: `(vaho_dx, vaho_dy, vaho_dz, vaho_peso)` relativos a la cámara.
+
+### 12.2 Rampas globales y máquina de estados del vaho (`src/engine/src/cristales.rs`)
+
+- **Rampas lineales por tick (20/s) con salto al objetivo al entrar al mundo:**
+  - Escarcha exterior: objetivo `1,0` nevando, `0,7` noche (`12 542..23 460`), `0,45` día; sube en `90 s`, baja en `150 s`.
+  - Repisa de nieve: objetivo `1,0` nevando, `0,0` si no; sube en `60 s`, baja en `240 s`.
+  - Arena: con lluvia en bioma seco `1,0` con trueno (`> 0,5`) o `0,5` sin trueno (× intensidad, máx. `1,0`), `0` sin
+    lluvia; sube en `60 s`, baja en `180 s`, visible si `> 1/64`.
+  - Condensación interior: `1,0` de noche (`12 542..23 460`) o con tormenta (`clima > 0,05` y `trueno > 0,5`); sube en
+    `90 s`, baja en `60 s`.
+- **Vaho del aliento:** usa `ClientHost::crosshair_target()` (`CrosshairTarget::Block { pos, hit, .. }`, `hit.point` a
+  `<= 1,5` bloques sobre un bloque de cristal). Exhala cada `2,8–3,8 s` durante `0,5 s` (`+0,45`), ensanchando la
+  elipse hasta `1,7×` tras 5 exhalaciones repetidas a `< 0,3` bloques, mantiene el vaho `35 s` y lo desvanece en `20 s`
+  (apagado inmediatamente en espectador).
+
+### 12.3 Intento de sustitución de `minecraft:block/glass` en el mod y límite de Horizon
+
+Se probó sustituir `minecraft:block/glass` y `glass_pane_top` por una textura limpia con alfa interior `6/255 ≈ 0,0235`
+para superar el recorte `albedo.a < 0,01` bajo `coverage = "engine"` (`shaders-reference-0.2.md:103-111`):
+
+1. Colocar `assets/minecraft/textures/block/glass.png` en el mod es rechazado por la valla de recursos de Horizon
+   (`docs/horizon/modding-dd67b76/src/how-to/content-mods.md:802-806, 839`: solo tags y `assets/minecraft/atlases/`
+   pueden usar el espacio de nombres `minecraft`).
+2. Colocar `assets/vulpe/textures/block/glass.png` y añadir `assets/minecraft/atlases/blocks.json`:
+   - con `"type": "minecraft:filter"` el cargador de Horizon lo descarta (`Horizon: atlas minecraft:blocks skipped:
+     sources[4]: malformed source`);
+   - con `"type": "minecraft:single"` (`resource: "vulpe:block/glass"`, `sprite: "minecraft:block/glass"`) carga sin
+     aviso pero **no sobrescribe** el sprite `minecraft:block/glass` ya cargado por `sources[0]` (`minecraft:directory`
+     vanilla).
+3. El cristal transparente se resuelve finalmente del lado del shader pack mediante DDA entero sobre `cristal_mapa` en
+   `etapas/post/03-composicion.wgsl` (`F-91`), sin tocar `coverage = "engine"` y con coste ~0 ms en escenas sin cristal.
+

@@ -1,12 +1,12 @@
 {
   "sources": [
     {
-      "type": "single",
+      "type": "minecraft:single",
       "resource": "vulpe:block/glass",
       "sprite": "minecraft:block/glass"
     },
     {
-      "type": "single",
+      "type": "minecraft:single",
       "resource": "vulpe:block/glass_pane_top",
       "sprite": "minecraft:block/glass_pane_top"
     }
